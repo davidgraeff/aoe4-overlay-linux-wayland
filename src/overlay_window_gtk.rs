@@ -7,6 +7,9 @@ use std::sync::{
     atomic::{AtomicBool, Ordering},
     mpsc::Receiver,
 };
+
+use crate::system_menu::SystemTray;
+
 use tokio::task;
 
 #[derive(Clone, Debug)]
@@ -144,7 +147,9 @@ impl OverlayWindow {
 
     pub fn update_image_from_data(&self, pixbuf: PixbufWrapper) {
         // Scale the image to configured size
-        if let Some(scaled_pixbuf) = pixbuf.to_pixbuf().scale_simple(
+        let pixbuf = pixbuf.to_pixbuf();
+        let pixbuf = pixbuf.new_subpixbuf(0, pixbuf.height() - 500, 300, 500);
+        if let Some(scaled_pixbuf) = pixbuf.scale_simple(
             self.config.width,
             self.config.height,
             gdk_pixbuf::InterpType::Bilinear,
@@ -166,9 +171,14 @@ pub async fn run_async_with_image_receiver(
     gtk_receiver: Receiver<PixbufWrapper>,
     config: OverlayConfig,
 ) -> Result<()> {
+    let should_quit_for_gtk = should_quit.clone();
+
     // Start the GTK thread
     let gtk_handle = std::thread::spawn(move || -> Result<()> {
         let window = OverlayWindow::new(config)?;
+
+        // Initialize system tray icon with quit handler
+        let _tray = SystemTray::new(should_quit_for_gtk.clone())?;
 
         // Create main loop
         let main_context = glib::MainContext::default();
@@ -179,25 +189,33 @@ pub async fn run_async_with_image_receiver(
 
         // Use Rc for single-threaded reference counting within GTK thread
         let window_rc = std::rc::Rc::new(window);
-        let window_for_timeout = std::rc::Rc::clone(&window_rc);
+        let window_for_image_updates = std::rc::Rc::clone(&window_rc);
 
         glib::idle_add_local(move || {
             // Process any pending images
             while let Ok(pixbuf) = gtk_receiver.try_recv() {
-                window_for_timeout.update_image_from_data(pixbuf);
+                window_for_image_updates.update_image_from_data(pixbuf);
             }
             glib::ControlFlow::Continue
         });
 
         glib::timeout_add_local(std::time::Duration::from_millis(100), move || {
             // Check for quit signal
-            if should_quit.load(Ordering::Relaxed) {
+            if should_quit_for_gtk.load(Ordering::Relaxed) {
                 log::info!("Quit signal received, quitting window");
                 main_loop_quit.quit();
                 return glib::ControlFlow::Break;
             }
 
             glib::ControlFlow::Continue
+        });
+
+        // React to window close request
+        let main_loop_quit_clone = main_loop.clone();
+        window_rc.window.connect_close_request(move |_| {
+            log::info!("Window close requested, quitting...");
+            main_loop_quit_clone.quit();
+            glib::signal::Propagation::Proceed
         });
 
         // Show the window
@@ -211,6 +229,7 @@ pub async fn run_async_with_image_receiver(
     // Run async blocking until GTK thread completes
     let _ = task::spawn_blocking(move || {
         let _ = gtk_handle.join();
-    }).await?;
+    })
+    .await?;
     Ok(())
 }

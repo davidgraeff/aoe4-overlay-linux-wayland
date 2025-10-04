@@ -1,19 +1,27 @@
+#![allow(incomplete_features)]
 #![feature(async_drop)]
 
 use crate::{
     overlay_window_gtk::{OverlayConfig, PixbufWrapper, run_async_with_image_receiver},
     process_monitor::WaitForProcessResult,
+    system_tray::{Base, Menu},
 };
 use anyhow::Result;
 use clap::Parser;
+use libappindicator_zbus::{
+    TrayConnection, tray,
+    utils::{Category, EventUpdate},
+};
 use log::{error, info};
-use std::sync::{mpsc as std_mpsc};
+use std::sync::mpsc as std_mpsc;
 use tokio::signal;
 
 mod dbus_portal_screen_cast;
 mod overlay_window_gtk;
 mod pipewire_stream;
 mod process_monitor;
+mod system_menu;
+mod system_tray;
 mod utils;
 mod wayland_record;
 
@@ -103,8 +111,7 @@ async fn main() -> Result<()> {
     let (gtk_sender, gtk_receiver) = std_mpsc::sync_channel::<PixbufWrapper>(2);
 
     // Start the Wayland recorder
-    let mut wayland_recorder =
-        wayland_record::WaylandRecorder::new("aoe4_screen").await?;
+    let mut wayland_recorder = wayland_record::WaylandRecorder::new("aoe4_screen").await?;
 
     // Determine record type based on capture mode
     let record_type = match args.capture_mode.as_str() {
@@ -154,10 +161,30 @@ async fn main() -> Result<()> {
             }
         }
     } else {
-        if !wayland_recorder.start(record_type, cursor_mode, gtk_sender).await {
+        if !wayland_recorder
+            .start(record_type, cursor_mode, gtk_sender)
+            .await
+        {
             error!("Failed to start Wayland recorder");
         }
     }
+
+    let should_quit_tray_icon = should_quit.clone();
+    let _connection = tray(
+        Base::boot,
+        "com.aoe4.overlay.tray",
+        "Age of Empires IV Overlay",
+        Menu::boot,
+        Menu::menu,
+        1,
+    )
+    .with_icon_pixmap(Base::icon_pixmap)
+    .with_item_is_menu(false)
+    .with_category(Category::ApplicationStatus)
+    .with_menu_status(Menu::status)
+    .with_on_clicked(Menu::on_clicked)
+    .run()
+    .await?;
 
     let should_quit_process_monitor = should_quit.clone();
     let should_quit_ctrl_c = should_quit.clone();
