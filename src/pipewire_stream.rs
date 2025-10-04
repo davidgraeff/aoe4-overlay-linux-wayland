@@ -7,8 +7,7 @@ use pipewire::{
     spa::{
         pod::{ChoiceValue, serialize::PodSerializer},
         sys::{
-            SPA_PARAM_EnumFormat, SPA_TYPE_OBJECT_Format, spa_format_parse,
-            spa_format_video_raw_parse, spa_video_info_raw,
+            SPA_PARAM_EnumFormat, SPA_TYPE_OBJECT_Format,
         },
         utils,
         utils::{ChoiceEnum, ChoiceFlags, Direction},
@@ -78,7 +77,7 @@ impl PipeWireStream {
                 );
             })
             .param_changed(|_stream, _user_data, id, param| {
-                if let Some(param) = param {
+                if let Some(_param) = param {
                     if id == ParamType::Format.as_raw() {
                         log::info!("Stream format changed");
                     } else if id == ParamType::Latency.as_raw() {
@@ -113,7 +112,7 @@ impl PipeWireStream {
                         log::error!("Failed to dequeue buffer");
                         return;
                     }
-                    Some(mut buffer) => buffer,
+                    Some(buffer) => buffer,
                 };
 
                 let data = buffer.datas_mut();

@@ -8,12 +8,18 @@ resolver = "3"
 serde = { version = "1.0", features = ["derive"] }
 tokio = { version = ">=1.40", features = ["rt", "rt-multi-thread", "macros", "signal"] }
 
+# CLI
+clap = { version = "4.5", features = ["derive"] }
+
 # Logging
 log = "0.4"
 env_logger = "0.11"
 
 # Error handling
 anyhow = "1.0"
+
+# Process monitoring
+procfs = "0.17"
 
 # GUI
 gdk = { git = "https://github.com/gtk-rs/gtk4-rs.git", version = ">=0.10", package = "gdk4", features = ["v4_16"] }

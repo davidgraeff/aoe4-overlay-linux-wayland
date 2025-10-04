@@ -3,11 +3,12 @@ use crate::{overlay_window_gtk::PixbufWrapper, pipewire_stream::PipeWireStream};
 use anyhow::Result;
 use std::{
     collections::HashMap,
-    sync::{Arc, Mutex, mpsc::Sender},
+    sync::{Arc, Mutex, mpsc::SyncSender},
     thread,
     thread::JoinHandle,
 };
-use std::sync::mpsc::SyncSender;
+use std::future::AsyncDrop;
+use std::pin::Pin;
 use zbus::{
     Connection, MessageStream,
     export::ordered_stream::OrderedStreamExt,
@@ -17,39 +18,35 @@ use zbus::{
 
 #[derive(Clone, Copy)]
 pub enum RecordTypes {
-    Default,
     Monitor,
     Window,
-    MonitorOrWindow,
 }
 
 #[derive(Clone, Copy)]
 pub enum CursorModeTypes {
-    Default,
     Hidden,
     Show,
 }
 
-use crate::screen_cast::ScreenCastProxy;
+use crate::dbus_portal_screen_cast::ScreenCastProxy;
 
 enum PipewireMessage {
     Stop,
     Connect(u32),
 }
 
-#[derive(Clone)]
 pub struct WaylandRecorder {
     connection: Connection,
     screen_cast_proxy: ScreenCastProxy<'static>,
     session_path: String,
     id: OwnedValue,
     stream_node_id: Arc<Mutex<Option<u32>>>,
-    pw_thread: Arc<JoinHandle<()>>,
+    pw_thread: Option<JoinHandle<()>>,
     pw_sender: pipewire::channel::Sender<PipewireMessage>,
 }
 
 impl WaylandRecorder {
-    pub async fn new(id: &str, sender: SyncSender<PixbufWrapper>) -> Result<Self> {
+    pub async fn new(id: &str) -> Result<Self> {
         let connection = Connection::session()
             .await
             .expect("failed to connect to session bus");
@@ -57,7 +54,28 @@ impl WaylandRecorder {
             .await
             .expect("failed to create dbus proxy for screen-cast");
 
+        let (pw_sender, _pw_receiver) = pipewire::channel::channel::<PipewireMessage>();
+
+        Ok(WaylandRecorder {
+            connection,
+            screen_cast_proxy,
+            session_path: String::new(),
+            id: Value::from(id).try_to_owned().unwrap(),
+            stream_node_id: Arc::new(Mutex::new(None)),
+            pw_thread: None,
+            pw_sender,
+        })
+    }
+
+    pub async fn start(
+        &mut self,
+        record_type: RecordTypes,
+        cursor_mode_type: CursorModeTypes,
+        sender: SyncSender<PixbufWrapper>
+    ) -> bool {
         let (pw_sender, pw_receiver) = pipewire::channel::channel::<PipewireMessage>();
+        self.pw_sender = pw_sender;
+
         let pw_thread = thread::spawn(move || {
             let pipewire_stream = PipeWireStream::new(sender).unwrap();
             let mainloop = pipewire_stream.main_loop.clone();
@@ -65,7 +83,10 @@ impl WaylandRecorder {
             let pipewire_stream_arc = Arc::new(Mutex::new(pipewire_stream));
             let _receiver = pw_receiver.attach(mainloop.loop_(), {
                 move |m| match m {
-                    PipewireMessage::Stop => mainloop_clone.quit(),
+                    PipewireMessage::Stop => {
+                        log::info!("PipeWire main loop: Received stop message, quitting...");
+                        mainloop_clone.quit()
+                    }
                     PipewireMessage::Connect(stream_node_id) => {
                         let mut pipewire_stream = pipewire_stream_arc.lock().unwrap();
                         pipewire_stream.connect_to_node(stream_node_id).unwrap();
@@ -76,26 +97,8 @@ impl WaylandRecorder {
             mainloop.run();
             log::info!("Finished PipeWire main loop");
         });
-        let pw_thread = Arc::new(pw_thread);
+        self.pw_thread = Some(pw_thread);
 
-        // Start a task to monitor stream_node_id and initialize PipeWireStream when available
-
-        Ok(WaylandRecorder {
-            connection,
-            screen_cast_proxy,
-            session_path: String::new(),
-            id: Value::from(id).try_to_owned().unwrap(),
-            stream_node_id: Arc::new(Mutex::new(None)),
-            pw_thread,
-            pw_sender,
-        })
-    }
-
-    pub async fn start(
-        &mut self,
-        record_type: RecordTypes,
-        cursor_mode_type: CursorModeTypes,
-    ) -> bool {
         let id_value = Value::from(self.id.clone());
         let option_map: HashMap<&str, &Value> = [
             ("handle_token", &id_value),
@@ -109,7 +112,7 @@ impl WaylandRecorder {
 
         let mut message_stream: MessageStream = self.connection.clone().into();
 
-        while let Ok(msg) = message_stream.next().await.expect("failed to get message") {
+        while let Some(Ok(msg)) = message_stream.next().await {
             match msg.message_type() {
                 message::Type::Signal => {
                     let body = msg.body();
@@ -145,7 +148,7 @@ impl WaylandRecorder {
                     }
                 }
                 _ => {
-                    println!("\n\nUnkown message: {:?}", msg);
+                    log::warn!("Unkown message: {:?}", msg);
                 }
             }
         }
@@ -154,6 +157,13 @@ impl WaylandRecorder {
     }
 
     pub async fn stop(&mut self) {
+        log::info!("Stopping Wayland Recorder");
+        let _ = self.pw_sender.send(PipewireMessage::Stop);
+
+        if let Some(pw_thread) = self.pw_thread.take() {
+            let _ = pw_thread.join();
+        }
+
         if self.session_path.len() > 0 {
             println!(
                 "Closing session...: {:?}",
@@ -191,13 +201,10 @@ impl WaylandRecorder {
         self.session_path = response_session_handle.clone();
 
         let types_value: Value = match record_type {
-            RecordTypes::Default => Value::from(0u32),
             RecordTypes::Monitor => Value::from(1u32),
             RecordTypes::Window => Value::from(2u32),
-            RecordTypes::MonitorOrWindow => Value::from(3u32),
         };
         let cursor_mode_value: Value = match cursor_mode_type {
-            CursorModeTypes::Default => Value::from(0u32),
             CursorModeTypes::Hidden => Value::from(1u32),
             CursorModeTypes::Show => Value::from(2u32),
         };
@@ -319,14 +326,22 @@ impl WaylandRecorder {
 
         Ok(())
     }
+}
 
-    pub fn get_stream_node_id(&self) -> Option<u32> {
-        *self.stream_node_id.lock().unwrap()
+impl AsyncDrop for WaylandRecorder {
+    async fn drop(mut self: Pin<&mut Self>) {
+        log::info!("Dropping Wayland Recorder");
+        self.stop().await;
     }
 }
 
 impl Drop for WaylandRecorder {
     fn drop(&mut self) {
+        log::info!("Dropping Wayland Recorder");
         let _ = self.pw_sender.send(PipewireMessage::Stop);
+
+        if let Some(pw_thread) = self.pw_thread.take() {
+            let _ = pw_thread.join();
+        }
     }
 }

@@ -1,10 +1,11 @@
-* UI overlay window (use gtk-rs)
-  - [ ] Implement a semi-transparent overlay window that displays on top of all other windows.
-  - [ ] Ensure the overlay window can be toggled on and off with a keyboard shortcut.
-  - [ ] Add functionality via application config parameters (clap) to customize the opacity and size of the overlay window.
-  - [ ] Document the implementation details and usage instructions for the overlay window feature.
+* UI overlay window
+  - [x] Implement a semi-transparent overlay window that displays on top of all other windows for debugging the captured frames.
+  - [x] Ensure the application can be quit with a global keyboard shortcut (implemented via Ctrl-C, global shortcuts on Wayland are limited by design for security).
+  - [ ] Add a notification area icon with a menu item to be able to quit the application.
+  - [x] Add functionality via application config parameters (clap) to customize the opacity, size and position of the overlay window.
 * Screen recording on Wayland (via dbus org.freedesktop.portal.ScreenCast)
-    - [ ] Get a pipewire handle for screen capture using the ScreenCast portal.
-    - [ ] Use pipewire to connect to the stream and provide a callback with the video frames (see https://docs.pipewire.org/page_tutorial5.html).
-    - [ ] Add options to start, stop, and save recordings via keyboard shortcuts.
-    - [ ] Document the implementation details and usage instructions for the screen recording feature.
+  - [x] Get a pipewire handle for screen capture using the ScreenCast portal for a full screen.
+    - [x] Capture only a specific application window (e.g. a game) instead of the full screen, configurable via clap.
+  - [x] Use pipewire to connect to the stream and provide a callback with the video frames (see https://docs.pipewire.org/page_tutorial5.html).
+  - [x] Only start capturing when a certain process is running (e.g. a game).
+    - [x] Add functionality via application config parameters (clap) to customize the process name and check interval.

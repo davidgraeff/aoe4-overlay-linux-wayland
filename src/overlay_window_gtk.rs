@@ -7,11 +7,33 @@ use std::sync::{
     atomic::{AtomicBool, Ordering},
     mpsc::Receiver,
 };
+use tokio::task;
+
+#[derive(Clone, Debug)]
+pub struct OverlayConfig {
+    pub opacity: f64,
+    pub width: i32,
+    pub height: i32,
+    pub x_position: i32,
+    pub y_position: i32,
+}
+
+impl Default for OverlayConfig {
+    fn default() -> Self {
+        Self {
+            opacity: 0.8,
+            width: 320,
+            height: 240,
+            x_position: 0,
+            y_position: 0,
+        }
+    }
+}
 
 pub struct OverlayWindow {
     window: gtk::Window,
-    should_quit: Arc<AtomicBool>,
     image_widget: gtk::Picture,
+    config: OverlayConfig,
 }
 
 pub struct PixbufWrapper {
@@ -22,7 +44,7 @@ pub struct PixbufWrapper {
 }
 
 impl PixbufWrapper {
-    pub fn to_pixbuf(mut self) -> Pixbuf {
+    pub fn to_pixbuf(self) -> Pixbuf {
         Pixbuf::from_bytes(
             &glib::Bytes::from(&self.bgr_buffer),
             gdk_pixbuf::Colorspace::Rgb,
@@ -36,15 +58,15 @@ impl PixbufWrapper {
 }
 
 impl OverlayWindow {
-    pub fn new(should_quit: Arc<AtomicBool>) -> Result<Self> {
+    pub fn new(config: OverlayConfig) -> Result<Self> {
         // Initialize GTK
         gtk::init()?;
 
-        // Create the main window with size for scaled image (320x240)
+        // Create the main window with configured size
         let window = gtk::Window::builder()
             .title("AOE4 Overlay")
-            .default_width(320)
-            .default_height(240)
+            .default_width(config.width)
+            .default_height(config.height)
             .decorated(false)
             .resizable(false)
             .build();
@@ -55,15 +77,17 @@ impl OverlayWindow {
 
         // Set up CSS for transparency and image styling
         let css_provider = gtk::CssProvider::new();
-        css_provider.load_from_string(
-            "window {
-                background-color: rgba(0, 0, 0, 0.8);
-            }
-            picture {
+        let css_content = format!(
+            "window {{
+                background-color: rgba(0, 0, 0, {});
+            }}
+            picture {{
                 border: 2px solid white;
                 border-radius: 5px;
-            }",
+            }}",
+            config.opacity
         );
+        css_provider.load_from_string(&css_content);
 
         gtk::style_context_add_provider_for_display(
             &gdk::Display::default().expect("Could not connect to display"),
@@ -75,27 +99,28 @@ impl OverlayWindow {
         let image_widget = gtk::Picture::new();
         image_widget.set_halign(gtk::Align::Center);
         image_widget.set_valign(gtk::Align::Center);
-        image_widget.set_size_request(320, 240);
+        image_widget.set_size_request(config.width, config.height);
 
         // Add image widget to window
         window.set_child(Some(&image_widget));
 
-        // Handle window close event
-        let should_quit_clone = Arc::clone(&should_quit);
-        window.connect_close_request(move |_| {
-            should_quit_clone.store(true, Ordering::Relaxed);
-            glib::Propagation::Proceed
-        });
-
         Ok(Self {
             window,
-            should_quit,
             image_widget,
+            config,
         })
     }
 
     pub fn show(&self) {
         self.window.present();
+
+        // Set window position if specified (non-zero values)
+        if self.config.x_position != 0 || self.config.y_position != 0 {
+            // Note: On Wayland, window positioning is limited for security reasons
+            // This may not work as expected on all compositors
+            log::warn!("Window positioning on Wayland may be limited by the compositor");
+        }
+
         // Make window input-transparent (non-clickable)
         if let Some(surface) = self.window.surface() {
             surface.set_input_region(&cairo::Region::create());
@@ -117,18 +142,13 @@ impl OverlayWindow {
         });
     }
 
-    pub fn close(&self) {
-        self.should_quit.store(true, Ordering::Relaxed);
-        self.window.close();
-    }
-
     pub fn update_image_from_data(&self, pixbuf: PixbufWrapper) {
-        // Scale the image to 320x240
-        if let Some(scaled_pixbuf) =
-            pixbuf
-                .to_pixbuf()
-                .scale_simple(320, 240, gdk_pixbuf::InterpType::Bilinear)
-        {
+        // Scale the image to configured size
+        if let Some(scaled_pixbuf) = pixbuf.to_pixbuf().scale_simple(
+            self.config.width,
+            self.config.height,
+            gdk_pixbuf::InterpType::Bilinear,
+        ) {
             // Create a texture from the scaled pixbuf
             let texture = gdk::Texture::for_pixbuf(&scaled_pixbuf);
             self.image_widget.set_paintable(Some(&texture));
@@ -144,14 +164,11 @@ pub fn create_quit_signal() -> Arc<AtomicBool> {
 pub async fn run_async_with_image_receiver(
     should_quit: Arc<AtomicBool>,
     gtk_receiver: Receiver<PixbufWrapper>,
+    config: OverlayConfig,
 ) -> Result<()> {
-    let window_should_quit = Arc::clone(&should_quit);
-    // let receiver_should_quit = Arc::clone(&should_quit);
-
     // Start the GTK thread
     let gtk_handle = std::thread::spawn(move || -> Result<()> {
-        let window = OverlayWindow::new(window_should_quit.clone())?;
-        let should_quit_for_timeout = Arc::clone(&window_should_quit);
+        let window = OverlayWindow::new(config)?;
 
         // Create main loop
         let main_context = glib::MainContext::default();
@@ -174,7 +191,8 @@ pub async fn run_async_with_image_receiver(
 
         glib::timeout_add_local(std::time::Duration::from_millis(100), move || {
             // Check for quit signal
-            if should_quit_for_timeout.load(Ordering::Relaxed) {
+            if should_quit.load(Ordering::Relaxed) {
+                log::info!("Quit signal received, quitting window");
                 main_loop_quit.quit();
                 return glib::ControlFlow::Break;
             }
@@ -190,17 +208,9 @@ pub async fn run_async_with_image_receiver(
         Ok(())
     });
 
-    // Wait for either the image handler to finish or quit signal
-    tokio::select! {
-        _ = async {
-            while !should_quit.load(Ordering::Relaxed) {
-                tokio::time::sleep(std::time::Duration::from_millis(100)).await;
-            }
-        } => {},
-    }
-
-    // Wait for GTK thread to finish
-    let _ = gtk_handle.join();
-
+    // Run async blocking until GTK thread completes
+    let _ = task::spawn_blocking(move || {
+        let _ = gtk_handle.join();
+    }).await?;
     Ok(())
 }
