@@ -1,0 +1,29 @@
+[package]
+name = "aoe4_overlay"
+version = "0.1.0"
+edition = "2024"
+resolver = "3"
+
+[dependencies]
+serde = { version = "1.0", features = ["derive"] }
+tokio = { version = ">=1.40", features = ["rt", "rt-multi-thread", "macros", "signal"] }
+
+# Logging
+log = "0.4"
+env_logger = "0.11"
+
+# Error handling
+anyhow = "1.0"
+
+# GUI
+gdk = { git = "https://github.com/gtk-rs/gtk4-rs.git", version = ">=0.10", package = "gdk4", features = ["v4_16"] }
+gtk = { git = "https://github.com/gtk-rs/gtk4-rs.git", version = ">=0.10", package = "gtk4", features = ["gnome_48"] }
+
+glib = "0.21"
+
+# Streaming and DBus
+zbus = { version = "5.11", default-features = false, features = ["tokio"] }
+enigo = "0.6"
+pipewire = { version = "0.8", features = ["v0_3_77"] }
+#ezk-image = "0.3.0"
+#image = "0.25"

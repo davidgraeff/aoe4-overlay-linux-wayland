@@ -1,0 +1,10 @@
+* UI overlay window (use gtk-rs)
+  - [ ] Implement a semi-transparent overlay window that displays on top of all other windows.
+  - [ ] Ensure the overlay window can be toggled on and off with a keyboard shortcut.
+  - [ ] Add functionality via application config parameters (clap) to customize the opacity and size of the overlay window.
+  - [ ] Document the implementation details and usage instructions for the overlay window feature.
+* Screen recording on Wayland (via dbus org.freedesktop.portal.ScreenCast)
+    - [ ] Get a pipewire handle for screen capture using the ScreenCast portal.
+    - [ ] Use pipewire to connect to the stream and provide a callback with the video frames (see https://docs.pipewire.org/page_tutorial5.html).
+    - [ ] Add options to start, stop, and save recordings via keyboard shortcuts.
+    - [ ] Document the implementation details and usage instructions for the screen recording feature.
