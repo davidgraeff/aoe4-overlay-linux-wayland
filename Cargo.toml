@@ -32,7 +32,7 @@ libappindicator-zbus = "0.1"
 
 # Computer Vision & OCR
 opencv = { version = "0.96", default-features = false, features = ["imgproc", "imgcodecs", "highgui", "clang-runtime"] }
-image = "0.25"
+image = { version = "0.25", features = ["color_quant"] }
 ocrs = "0.11"
 
 # Streaming and DBus
@@ -40,5 +40,13 @@ zbus = { version = "5.11", default-features = false, features = ["tokio"] }
 enigo = "0.6"
 pipewire = { version = "0.8", features = ["v0_3_77"] }
 rten = "0.22.1"
-rten-imageproc = "0.22.1"
-itertools = "0.12.1"
+
+ort = { version = "2.0.0-rc.10", features = ["migraphx", "rocm", "download-binaries", "fetch-models"] }
+oar-ocr = { version = "0.2" }
+imageproc = "0.25.0"
+
+[profile.release]
+opt-level = 2
+
+[profile.test]
+opt-level = 2

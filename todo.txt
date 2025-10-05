@@ -10,9 +10,13 @@
   - [x] Only start capturing when a certain process is running (e.g. a game).
     - [x] Add functionality via application config parameters (clap) to customize the process name and check interval.
 * Object detection / Computer Vision to detect game notification boxes (villagers in queue etc)
-  - [ ] Use OpenCV to process the captured frames and detect specific UI elements (e.g. villagers in queue notification box).
-  - [ ] Implement a simple color-based detection algorithm to identify the notification box based on its color and shape.
-    - [ ] If color-based detection is not reliable enough, consider using template matching or feature-based detection.
+  - [x] Use template matching to identify the notification box.
 * Use OCR to read text from the detected notification boxes and from the entire frame
-  - [ ] Integrate OCR to read text. The text locations do not change, so we can crop the image to only the relevant areas.
-  - [ ] Extract and log the relevant information (e.g. number of villagers in queue).
+  - [x] Integrate OCR to read text. The text locations do not change, so we can crop the image to only the relevant areas.
+  - [x] Extract and log the relevant information (e.g. number of villagers in queue).
+* [ ] Integrate OCR and object detection results from integration tests into main application
+  - [ ] Move functionality from integration tests into main application
+  - [ ] Use a bounded communication channel (e.g. tokio channel) to send the captured frames from the screen recording part to the OCR and object detection part. Drop frames if the processing is too slow.
+  - [ ] Use a communication channel (e.g. tokio channel) to send the captured frames together with the OCR and object detection parts to the UI thread.
+  - [ ] Display the extracted information in the overlay window.
+  - [ ] Add functionality via application config parameters (clap) to customize what information is displayed.
