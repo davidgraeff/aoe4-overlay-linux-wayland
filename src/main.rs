@@ -9,8 +9,8 @@ use crate::{
 use anyhow::Result;
 use clap::Parser;
 use libappindicator_zbus::{
-    TrayConnection, tray,
-    utils::{Category, EventUpdate},
+    tray,
+    utils::{Category},
 };
 use log::{error, info};
 use std::sync::mpsc as std_mpsc;
@@ -169,7 +169,6 @@ async fn main() -> Result<()> {
         }
     }
 
-    let should_quit_tray_icon = should_quit.clone();
     let _connection = tray(
         Base::boot,
         "com.aoe4.overlay.tray",

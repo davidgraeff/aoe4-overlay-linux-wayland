@@ -1,5 +1,3 @@
-use std::sync::Arc;
-use std::sync::atomic::AtomicBool;
 use libappindicator_zbus::{
     utils::{
         ButtonOptions, EventUpdate, IconPixmap, MenuStatus, MenuUnit,
@@ -32,7 +30,6 @@ impl Base {
 #[derive(Debug, Clone, Copy)]
 pub(crate) enum Message {
     Clicked,
-    Toggled,
 }
 
 pub(crate) struct Menu {
