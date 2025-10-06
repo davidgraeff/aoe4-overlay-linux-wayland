@@ -174,7 +174,7 @@ impl PipeWireStream {
                             alternatives: vec![
                                 utils::Id(spa::param::video::VideoFormat::BGRx.as_raw()),
                                 utils::Id(spa::param::video::VideoFormat::BGRA.as_raw()),
-                                utils::Id(spa::param::video::VideoFormat::BGR.as_raw()),
+                                // utils::Id(spa::param::video::VideoFormat::BGR.as_raw()),
                             ],
                         },
                     })),

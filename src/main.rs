@@ -5,6 +5,7 @@ use crate::{
     overlay_window_gtk::{OverlayConfig, PixbufWrapper, run_async_with_image_receiver},
     process_monitor::WaitForProcessResult,
     system_tray::{Base, Menu},
+    frame_processor::ProcessedFrame,
 };
 use anyhow::Result;
 use clap::Parser;
@@ -24,6 +25,9 @@ mod system_menu;
 mod system_tray;
 mod utils;
 mod wayland_record;
+mod frame_processor;
+mod image_analyzer;
+pub use aoe4_overlay::consts;
 
 /// AOE4 Overlay - Screen capture and overlay for Age of Empires IV
 #[derive(Parser, Debug)]
@@ -81,6 +85,20 @@ async fn main() -> Result<()> {
         anyhow::bail!("Opacity must be between 0.0 and 1.0");
     }
 
+    // Determine record type based on capture mode
+    let record_type = match args.capture_mode.as_str() {
+        "window" => wayland_record::RecordTypes::Window,
+        "monitor" => wayland_record::RecordTypes::Monitor,
+        _ => wayland_record::RecordTypes::Monitor,
+    };
+
+    // Determine cursor mode
+    let cursor_mode = if args.show_cursor {
+        wayland_record::CursorModeTypes::Show
+    } else {
+        wayland_record::CursorModeTypes::Hidden
+    };
+
     // Parse resolution
     let (width, height) = args
         .resolution
@@ -107,41 +125,44 @@ async fn main() -> Result<()> {
     );
     info!("Capture mode: {}", args.capture_mode);
 
-    // Create channel for image communication (using Vec<u8> for RGB data)
-    let (gtk_sender, gtk_receiver) = std_mpsc::sync_channel::<PixbufWrapper>(2);
-
-    // Start the Wayland recorder
-    let mut wayland_recorder = wayland_record::WaylandRecorder::new("aoe4_screen").await?;
-
-    // Determine record type based on capture mode
-    let record_type = match args.capture_mode.as_str() {
-        "window" => wayland_record::RecordTypes::Window,
-        "monitor" => wayland_record::RecordTypes::Monitor,
-        _ => wayland_record::RecordTypes::Monitor,
+    // Start frame processor
+    info!("Initializing frame processor...");
+    let frame_processor = match frame_processor::FrameProcessor::new() {
+        Ok(processor) => processor,
+        Err(e) => {
+            error!("Failed to initialize frame processor: {}", e);
+            anyhow::bail!("Frame processor initialization failed: {}", e);
+        }
     };
 
-    // Determine cursor mode
-    let cursor_mode = if args.show_cursor {
-        wayland_record::CursorModeTypes::Show
-    } else {
-        wayland_record::CursorModeTypes::Hidden
-    };
+    // Create std_mpsc channel for GTK (since GTK needs to run in its own thread)
+    let (gtk_sender, gtk_receiver) = std_mpsc::sync_channel::<ProcessedFrame>(2);
+    let (pipewire_sender, pipewire_receiver) = std_mpsc::sync_channel::<PixbufWrapper>(2);
 
-    let should_quit = overlay_window_gtk::create_quit_signal();
-    let should_quit_process_monitor = should_quit.clone();
-    let should_quit_ctrl_c = should_quit.clone();
+    // Run image processing in a separate thread. Quit by sending an empty frame.
+    let quit_processing_frame = pipewire_sender.clone();
+    let processor_handle = std::thread::spawn(move ||{
+        frame_processor.start_processing(pipewire_receiver, gtk_sender);
+    });
 
     let process_monitor = process_monitor::ProcessMonitor::new(
         args.process_name.unwrap_or_default(),
         args.check_interval,
     );
 
+    // Start the Wayland recorder
+    let mut wayland_recorder = wayland_record::WaylandRecorder::new("aoe4_screen").await?;
+
+    let should_quit = overlay_window_gtk::create_quit_signal();
+    let should_quit_process_monitor = should_quit.clone();
+    let should_quit_ctrl_c = should_quit.clone();
+
     if process_monitor.armed {
         tokio::select! {
             result = process_monitor.wait_for_process(should_quit_process_monitor) => {
                 match result {
                     WaitForProcessResult::ProcessFound => {
-                        if !wayland_recorder.start(record_type, cursor_mode, gtk_sender).await {
+                        if !wayland_recorder.start(record_type, cursor_mode, pipewire_sender).await {
                             error!("Failed to start Wayland recorder");
                         }
                     }
@@ -162,7 +183,7 @@ async fn main() -> Result<()> {
         }
     } else {
         if !wayland_recorder
-            .start(record_type, cursor_mode, gtk_sender)
+            .start(record_type, cursor_mode, pipewire_sender)
             .await
         {
             error!("Failed to start Wayland recorder");
@@ -223,6 +244,8 @@ async fn main() -> Result<()> {
     }
 
     wayland_recorder.stop().await;
+    quit_processing_frame.send(PixbufWrapper::quit())?;
+    let _ = processor_handle.join();
     info!("Done");
 
     Ok(())

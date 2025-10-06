@@ -9,6 +9,7 @@ use std::sync::{
 };
 
 use crate::system_menu::SystemTray;
+use crate::frame_processor::ProcessedFrame;
 
 use tokio::task;
 
@@ -36,14 +37,30 @@ impl Default for OverlayConfig {
 pub struct OverlayWindow {
     window: gtk::Window,
     image_widget: gtk::Picture,
+    overlay_container: gtk::Overlay,
+    text_labels_box: gtk::Box,
+    icon_labels_box: gtk::Box,
     config: OverlayConfig,
 }
 
+#[derive(Clone)]
 pub struct PixbufWrapper {
     pub bgr_buffer: Vec<u8>,
     pub width: i32,
     pub height: i32,
     pub stride: i32,
+}
+
+impl PixbufWrapper {
+    // Create an empty PixbufWrapper indicating to quit the processing thread
+    pub(crate) fn quit() -> PixbufWrapper {
+        PixbufWrapper {
+            bgr_buffer: vec![],
+            width: 0,
+            height: 0,
+            stride: 0,
+        }
+    }
 }
 
 impl PixbufWrapper {
@@ -78,7 +95,7 @@ impl OverlayWindow {
         window.set_focusable(false);
         window.set_focus_visible(false);
 
-        // Set up CSS for transparency and image styling
+        // Set up CSS for transparency and styling
         let css_provider = gtk::CssProvider::new();
         let css_content = format!(
             "window {{
@@ -87,6 +104,24 @@ impl OverlayWindow {
             picture {{
                 border: 2px solid white;
                 border-radius: 5px;
+            }}
+            .stat-label {{
+                background-color: rgba(0, 0, 0, 0.7);
+                color: white;
+                padding: 2px 5px;
+                margin: 2px;
+                font-family: monospace;
+                font-size: 12px;
+                border-radius: 3px;
+            }}
+            .icon-label {{
+                background-color: rgba(0, 128, 0, 0.7);
+                color: white;
+                padding: 2px 5px;
+                margin: 2px;
+                font-weight: bold;
+                font-size: 11px;
+                border-radius: 3px;
             }}",
             config.opacity
         );
@@ -104,12 +139,35 @@ impl OverlayWindow {
         image_widget.set_valign(gtk::Align::Center);
         image_widget.set_size_request(config.width, config.height);
 
-        // Add image widget to window
-        window.set_child(Some(&image_widget));
+        // Create overlay container
+        let overlay_container = gtk::Overlay::new();
+        overlay_container.set_child(Some(&image_widget));
+
+        // Create vertical box for text labels (top-left)
+        let text_labels_box = gtk::Box::new(gtk::Orientation::Vertical, 2);
+        text_labels_box.set_halign(gtk::Align::Start);
+        text_labels_box.set_valign(gtk::Align::Start);
+        text_labels_box.set_margin_start(5);
+        text_labels_box.set_margin_top(5);
+        overlay_container.add_overlay(&text_labels_box);
+
+        // Create vertical box for icon labels (top-right)
+        let icon_labels_box = gtk::Box::new(gtk::Orientation::Vertical, 2);
+        icon_labels_box.set_halign(gtk::Align::End);
+        icon_labels_box.set_valign(gtk::Align::Start);
+        icon_labels_box.set_margin_end(5);
+        icon_labels_box.set_margin_top(5);
+        overlay_container.add_overlay(&icon_labels_box);
+
+        // Add overlay container to window
+        window.set_child(Some(&overlay_container));
 
         Ok(Self {
             window,
             image_widget,
+            overlay_container,
+            text_labels_box,
+            icon_labels_box,
             config,
         })
     }
@@ -145,16 +203,58 @@ impl OverlayWindow {
         });
     }
 
-    pub fn update_image_from_data(&self, pixbuf: PixbufWrapper) {
-        // Scale the image to configured size
-        let pixbuf = pixbuf.to_pixbuf();
-        let pixbuf = pixbuf.new_subpixbuf(0, pixbuf.height() - 500, 300, 500);
+    pub fn update_image_from_processed_frame(&self, frame: ProcessedFrame) {
+        // Clear existing labels
+        while let Some(child) = self.text_labels_box.first_child() {
+            self.text_labels_box.remove(&child);
+        }
+        while let Some(child) = self.icon_labels_box.first_child() {
+            self.icon_labels_box.remove(&child);
+        }
+
+        // Add text detection labels
+        for detected_text in &frame.analysis.detected_texts {
+            let label_text = format!(
+                "{}: {} ({:.0}%)",
+                detected_text.stat_name,
+                detected_text.text,
+                detected_text.confidence * 100.0
+            );
+            let label = gtk::Label::new(Some(&label_text));
+            label.add_css_class("stat-label");
+            label.set_xalign(0.0);
+            self.text_labels_box.append(&label);
+        }
+
+        // Add icon detection labels
+        for detected_icon in &frame.analysis.detected_icons {
+            let label_text = format!(
+                "{} ({:.0}%)",
+                detected_icon.name,
+                detected_icon.confidence * 100.0
+            );
+            let label = gtk::Label::new(Some(&label_text));
+            label.add_css_class("icon-label");
+            label.set_xalign(0.0);
+            self.icon_labels_box.append(&label);
+        }
+
+        // Crop to region of interest (bottom 500px)
+        let pixbuf = frame.original.to_pixbuf();
+        let crop_height = pixbuf.height().min(500);
+        let crop_width = pixbuf.width().min(300);
+        let pixbuf = pixbuf.new_subpixbuf(
+            0,
+            pixbuf.height() - crop_height,
+            crop_width,
+            crop_height,
+        );
+
         if let Some(scaled_pixbuf) = pixbuf.scale_simple(
             self.config.width,
             self.config.height,
             gdk_pixbuf::InterpType::Bilinear,
         ) {
-            // Create a texture from the scaled pixbuf
             let texture = gdk::Texture::for_pixbuf(&scaled_pixbuf);
             self.image_widget.set_paintable(Some(&texture));
         }
@@ -168,7 +268,7 @@ pub fn create_quit_signal() -> Arc<AtomicBool> {
 
 pub async fn run_async_with_image_receiver(
     should_quit: Arc<AtomicBool>,
-    gtk_receiver: Receiver<PixbufWrapper>,
+    gtk_receiver: Receiver<ProcessedFrame>,
     config: OverlayConfig,
 ) -> Result<()> {
     let should_quit_for_gtk = should_quit.clone();
@@ -192,9 +292,9 @@ pub async fn run_async_with_image_receiver(
         let window_for_image_updates = std::rc::Rc::clone(&window_rc);
 
         glib::idle_add_local(move || {
-            // Process any pending images
-            while let Ok(pixbuf) = gtk_receiver.try_recv() {
-                window_for_image_updates.update_image_from_data(pixbuf);
+            // Process any pending processed frames
+            while let Ok(processed_frame) = gtk_receiver.try_recv() {
+                window_for_image_updates.update_image_from_processed_frame(processed_frame);
             }
             glib::ControlFlow::Continue
         });
