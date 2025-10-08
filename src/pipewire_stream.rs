@@ -6,9 +6,7 @@ use pipewire::{
     spa,
     spa::{
         pod::{ChoiceValue, serialize::PodSerializer},
-        sys::{
-            SPA_PARAM_EnumFormat, SPA_TYPE_OBJECT_Format,
-        },
+        sys::{SPA_PARAM_EnumFormat, SPA_TYPE_OBJECT_Format},
         utils,
         utils::{ChoiceEnum, ChoiceFlags, Direction},
     },
@@ -21,14 +19,20 @@ use spa::{
     },
     pod::{Object, Pod, Property, Value},
 };
-use std::sync::mpsc;
+use std::{
+    sync::mpsc,
+    time::{Duration, SystemTime, UNIX_EPOCH},
+};
 
+struct UserData {
+    last_time: u64,
+}
 /// Manages a PipeWire stream for screen capturing and sends images via a channel.
 pub struct PipeWireStream {
     pub(crate) main_loop: MainLoop,
     context: Context,
     stream: Option<Stream>,
-    listener: Option<StreamListener<()>>,
+    listener: Option<StreamListener<UserData>>,
     image_sender: mpsc::SyncSender<PixbufWrapper>,
 }
 
@@ -66,17 +70,24 @@ impl PipeWireStream {
         // Clone sender for the callback
         let sender = self.image_sender.clone();
 
+        let user_data = UserData {
+            last_time: SystemTime::now()
+                .duration_since(UNIX_EPOCH)
+                .unwrap_or(Duration::from_secs(0))
+                .as_millis() as u64,
+        };
+
         // Set up stream listener
         let listener = stream
-            .add_local_listener()
-            .state_changed(|_stream, _user_data: &mut (), old_state, new_state| {
+            .add_local_listener_with_user_data(user_data)
+            .state_changed(|_stream, _user_data: &mut UserData, old_state, new_state| {
                 log::info!(
                     "Stream state changed from {:?} to {:?}",
                     old_state,
                     new_state
                 );
             })
-            .param_changed(|_stream, _user_data, id, param| {
+            .param_changed(|_stream, _user_data: &mut UserData, id, param| {
                 if let Some(_param) = param {
                     if id == ParamType::Format.as_raw() {
                         log::info!("Stream format changed");
@@ -106,7 +117,7 @@ impl PipeWireStream {
                     }
                 }
             })
-            .process(move |stream, _user_data| {
+            .process(move |stream, user_data: &mut UserData| {
                 let mut buffer = match stream.dequeue_buffer() {
                     None => {
                         log::error!("Failed to dequeue buffer");
@@ -114,6 +125,18 @@ impl PipeWireStream {
                     }
                     Some(buffer) => buffer,
                 };
+                // Reduce framerate to every 100ms (10fps) by comparing timestamps
+                {
+                    use std::time::{Duration, SystemTime, UNIX_EPOCH};
+                    let now = SystemTime::now()
+                        .duration_since(UNIX_EPOCH)
+                        .unwrap_or(Duration::from_secs(0))
+                        .as_millis() as u64;
+                    if now.saturating_sub(user_data.last_time) < 200 {
+                        return;
+                    }
+                    user_data.last_time = now;
+                }
 
                 let data = buffer.datas_mut();
                 if data.is_empty() {

@@ -36,11 +36,14 @@ image = { version = "0.25", features = ["color_quant"] }
 
 # Streaming and DBus
 zbus = { version = "5.11", default-features = false, features = ["tokio"] }
-enigo = "0.6"
+enigo = { version = "0.6", default-features = true, features = ["wayland"] }
 pipewire = { version = "0.8", features = ["v0_3_77"] }
 
-ort = { version = "2.0.0-rc.10", features = ["migraphx", "rocm", "download-binaries", "fetch-models"] }
-oar-ocr = { version = "0.2" }
+# ort = { version = "2.0.0-rc.10", features = ["rocm", "download-binaries", "fetch-models"] }
+oar-ocr = { version = "0.2", path = "3rdparty/oar-ocr", features = ["rocm"] }
+
+rust-paddle-ocr = { git = "https://github.com/zibo-chen/rust-paddle-ocr.git", branch = "main" }
+rayon = "1.11"
 
 [profile.release]
 opt-level = 2

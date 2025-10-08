@@ -35,24 +35,12 @@ pub use aoe4_overlay::consts;
 #[command(about = "Screen capture overlay for AoE4 on Wayland", long_about = None)]
 struct Args {
     /// Capture mode: "monitor" for full screen, "window" for application window
-    #[arg(short = 'm', long, default_value = "monitor", value_parser = ["monitor", "window"])]
+    #[arg(short = 'm', long, default_value = "window", value_parser = ["monitor", "window"])]
     capture_mode: String,
 
-    /// Opacity of the overlay window (0.0 - 1.0)
-    #[arg(short = 'o', long, default_value = "0.8")]
-    opacity: f64,
-
-    /// Width of the overlay window in pixels
-    #[arg(short = 'r', default_value = "320*240")]
-    resolution: String,
-
-    /// X position of the overlay window (0 = default position)
-    #[arg(short = 'x', long, default_value = "0")]
-    x_position: i32,
-
-    /// Y position of the overlay window (0 = default position)
-    #[arg(short = 'y', long, default_value = "0")]
-    y_position: i32,
+    /// No debug window, only show overlay
+    #[arg(short = 'd', long, default_value_t = false)]
+    debug_window: bool,
 
     /// Process name to monitor (if set, capture only starts when this process is running)
     #[arg(short = 'p', long)]
@@ -61,10 +49,6 @@ struct Args {
     /// Process check interval in milliseconds
     #[arg(short = 'i', long, default_value = "1000")]
     check_interval: u64,
-
-    /// Show cursor in capture
-    #[arg(short = 'c', long, default_value = "false")]
-    show_cursor: bool,
 }
 
 #[tokio::main]
@@ -80,11 +64,6 @@ async fn main() -> Result<()> {
         anyhow::bail!("This program only works in a Wayland session.");
     }
 
-    // Validate opacity range
-    if args.opacity < 0.0 || args.opacity > 1.0 {
-        anyhow::bail!("Opacity must be between 0.0 and 1.0");
-    }
-
     // Determine record type based on capture mode
     let record_type = match args.capture_mode.as_str() {
         "window" => wayland_record::RecordTypes::Window,
@@ -92,31 +71,9 @@ async fn main() -> Result<()> {
         _ => wayland_record::RecordTypes::Monitor,
     };
 
-    // Determine cursor mode
-    let cursor_mode = if args.show_cursor {
-        wayland_record::CursorModeTypes::Show
-    } else {
-        wayland_record::CursorModeTypes::Hidden
-    };
-
-    // Parse resolution
-    let (width, height) = args
-        .resolution
-        .split_once('*')
-        .map(|(w_str, h_str)| {
-            let w = w_str.parse::<i32>().unwrap_or(320);
-            let h = h_str.parse::<i32>().unwrap_or(240);
-            (w, h)
-        })
-        .unwrap_or_else(|| (320i32, 240i32));
-
     // Create overlay configuration
     let overlay_config = OverlayConfig {
-        opacity: args.opacity,
-        width,
-        height,
-        x_position: args.x_position,
-        y_position: args.y_position,
+        show_debug_window: args.debug_window,
     };
 
     info!(
@@ -142,7 +99,7 @@ async fn main() -> Result<()> {
     // Run image processing in a separate thread. Quit by sending an empty frame.
     let quit_processing_frame = pipewire_sender.clone();
     let processor_handle = std::thread::spawn(move ||{
-        frame_processor.start_processing(pipewire_receiver, gtk_sender);
+        let _ = frame_processor.start_processing(pipewire_receiver, gtk_sender);
     });
 
     let process_monitor = process_monitor::ProcessMonitor::new(
@@ -162,7 +119,7 @@ async fn main() -> Result<()> {
             result = process_monitor.wait_for_process(should_quit_process_monitor) => {
                 match result {
                     WaitForProcessResult::ProcessFound => {
-                        if !wayland_recorder.start(record_type, cursor_mode, pipewire_sender).await {
+                        if !wayland_recorder.start(record_type, wayland_record::CursorModeTypes::Hidden, pipewire_sender).await {
                             error!("Failed to start Wayland recorder");
                         }
                     }
@@ -183,7 +140,7 @@ async fn main() -> Result<()> {
         }
     } else {
         if !wayland_recorder
-            .start(record_type, cursor_mode, pipewire_sender)
+            .start(record_type, wayland_record::CursorModeTypes::Hidden, pipewire_sender)
             .await
         {
             error!("Failed to start Wayland recorder");

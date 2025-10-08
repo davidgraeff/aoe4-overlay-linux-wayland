@@ -1,0 +1,3 @@
+[submodule "3rdparty/oar-ocr"]
+	path = 3rdparty/oar-ocr
+	url = https://github.com/GreatV/oar-ocr.git

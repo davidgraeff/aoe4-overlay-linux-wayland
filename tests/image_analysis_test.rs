@@ -1,7 +1,7 @@
 use anyhow::Result;
 use aoe4_overlay::{
     consts::*,
-    image_analyzer::{DetectedIcon, DetectedText, ImageAnalyzer},
+    image_analyzer::{DetectedIcon, DetectedText, ImageAnalyzerInner, OCRModel},
 };
 use opencv::{
     core::{Mat, Point, Rect, Scalar, Vector},
@@ -123,15 +123,20 @@ fn test_image_analysis() -> Result<()> {
 
     // Create image analyzer
     println!("\n--- Initializing Image Analyzer ---");
-    let analyzer = ImageAnalyzer::new()?;
+    let mut analyzer = ImageAnalyzerInner::new()?;
     println!("Image analyzer initialized successfully");
 
     // Analyze the image
     println!("\n--- Analyzing Image (OCR + Template Matching) ---");
-    let start_timestamp = std::time::Instant::now();
-    let analysis_result = analyzer.analyze(img.clone())?;
-    let duration_for_all = std::time::Instant::now() - start_timestamp;
-    println!("Full time: {} ms", duration_for_all.as_millis(),);
+    for model in [OCRModel::ONNX, OCRModel::OnnxPar, OCRModel::PP] {
+        println!("Using OCR Model: {:?}", &model);
+        let start_timestamp = std::time::Instant::now();
+        let _ = analyzer.analyze(img.clone(), model)?;
+        let duration_for_all = std::time::Instant::now() - start_timestamp;
+        println!("Full time: {} ms", duration_for_all.as_millis(),);
+    }
+
+    let analysis_result = analyzer.analyze(img.clone(), OCRModel::ONNX)?;
 
     println!(
         "Total texts detected: {}",

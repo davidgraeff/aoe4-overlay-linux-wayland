@@ -25,6 +25,7 @@ pub enum RecordTypes {
 #[derive(Clone, Copy)]
 pub enum CursorModeTypes {
     Hidden,
+    #[allow(dead_code)]
     Show,
 }
 

@@ -7,25 +7,35 @@ pub mod consts {
     pub const AREA_HEIGHT: i32 = -AREA_Y_OFFSET as i32;
     pub const AREA_WIDTH: i32 = 267;
 
-    #[derive(Debug, Clone)]
+
+    #[derive(Debug, Default, PartialEq, Clone, Copy)]
+    pub enum TextType {
+        #[default]
+        Unassigned,
+        Idle,
+        Population,
+    }
+
+    #[derive(Debug, Clone, Copy)]
     pub struct Aoe4StatPos{
         pub x: f32,
         pub y: f32,
         pub name: &'static str,
+        pub text_type: TextType,
     }
 
     pub const AOE4_STATS_POS: [Aoe4StatPos; 10] = [
-        Aoe4StatPos { x: 50.0, y: 190.0 + AREA_Y_OFFSET, name: "Pop" },
-        Aoe4StatPos { x: 50.0, y: 265.0 + AREA_Y_OFFSET, name: "Food" },
-        Aoe4StatPos { x: 50.0, y: 318.0 + AREA_Y_OFFSET, name: "Wood" },
-        Aoe4StatPos { x: 50.0, y: 369.0 + AREA_Y_OFFSET, name: "Gold" },
-        Aoe4StatPos { x: 50.0, y: 421.0 + AREA_Y_OFFSET, name: "Stone" },
+        Aoe4StatPos { x: 50.0, y: 190.0 + AREA_Y_OFFSET, name: "Pop", text_type: TextType::Population },
+        Aoe4StatPos { x: 50.0, y: 265.0 + AREA_Y_OFFSET, name: "Food", text_type: TextType::Unassigned  },
+        Aoe4StatPos { x: 50.0, y: 318.0 + AREA_Y_OFFSET, name: "Wood", text_type: TextType::Unassigned  },
+        Aoe4StatPos { x: 50.0, y: 369.0 + AREA_Y_OFFSET, name: "Gold", text_type: TextType::Unassigned  },
+        Aoe4StatPos { x: 50.0, y: 421.0 + AREA_Y_OFFSET, name: "Stone", text_type: TextType::Unassigned  },
 
-        Aoe4StatPos { x: 187.0, y: 190.0 + AREA_Y_OFFSET, name: "Idle" },
-        Aoe4StatPos { x: 187.0, y: 262.0 + AREA_Y_OFFSET, name: "Food Worker" },
-        Aoe4StatPos { x: 187.0, y: 315.0 + AREA_Y_OFFSET, name: "Wood Worker" },
-        Aoe4StatPos { x: 187.0, y: 366.0 + AREA_Y_OFFSET, name: "Gold Worker" },
-        Aoe4StatPos { x: 187.0, y: 419.0 + AREA_Y_OFFSET, name: "Stone Worker" },
+        Aoe4StatPos { x: 187.0, y: 190.0 + AREA_Y_OFFSET, name: "Idle", text_type: TextType::Idle  },
+        Aoe4StatPos { x: 187.0, y: 262.0 + AREA_Y_OFFSET, name: "Food Worker", text_type: TextType::Unassigned },
+        Aoe4StatPos { x: 187.0, y: 315.0 + AREA_Y_OFFSET, name: "Wood Worker", text_type: TextType::Unassigned },
+        Aoe4StatPos { x: 187.0, y: 366.0 + AREA_Y_OFFSET, name: "Gold Worker", text_type: TextType::Unassigned },
+        Aoe4StatPos { x: 187.0, y: 419.0 + AREA_Y_OFFSET, name: "Stone Worker", text_type: TextType::Unassigned },
     ];
 }
 

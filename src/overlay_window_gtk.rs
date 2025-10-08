@@ -1,35 +1,26 @@
+use crate::{frame_processor::ProcessedFrame, system_menu::SystemTray};
 use anyhow::Result;
 use enigo::{Enigo, Key, Keyboard, Settings};
 use gdk::{gdk_pixbuf, gdk_pixbuf::Pixbuf};
-use gtk::{cairo, glib, prelude::*};
+use gtk::{Label, cairo, glib, prelude::*};
 use std::sync::{
     Arc,
     atomic::{AtomicBool, Ordering},
     mpsc::Receiver,
 };
 
-use crate::system_menu::SystemTray;
-use crate::frame_processor::ProcessedFrame;
-
+use aoe4_overlay::consts::{AREA_HEIGHT, AREA_WIDTH, TextType};
 use tokio::task;
 
 #[derive(Clone, Debug)]
 pub struct OverlayConfig {
-    pub opacity: f64,
-    pub width: i32,
-    pub height: i32,
-    pub x_position: i32,
-    pub y_position: i32,
+    pub show_debug_window: bool,
 }
 
 impl Default for OverlayConfig {
     fn default() -> Self {
         Self {
-            opacity: 0.8,
-            width: 320,
-            height: 240,
-            x_position: 0,
-            y_position: 0,
+            show_debug_window: false,
         }
     }
 }
@@ -37,10 +28,11 @@ impl Default for OverlayConfig {
 pub struct OverlayWindow {
     window: gtk::Window,
     image_widget: gtk::Picture,
-    overlay_container: gtk::Overlay,
+    _overlay_container: gtk::Overlay,
     text_labels_box: gtk::Box,
     icon_labels_box: gtk::Box,
     config: OverlayConfig,
+    pub label: Label,
 }
 
 #[derive(Clone)]
@@ -82,24 +74,32 @@ impl OverlayWindow {
         // Initialize GTK
         gtk::init()?;
 
+        let monitors: gdk::gio::ListModel = gdk::Display::default().unwrap().monitors();
+        let monitor = monitors
+            .item(0)
+            .unwrap()
+            .downcast::<gdk::Monitor>()
+            .unwrap();
+
         // Create the main window with configured size
         let window = gtk::Window::builder()
             .title("AOE4 Overlay")
-            .default_width(config.width)
-            .default_height(config.height)
+            //            .fullscreened(true)
+            .default_width(monitor.geometry().width())
+            .default_height(monitor.geometry().height())
+            .maximized(false)
             .decorated(false)
             .resizable(false)
+            .focusable(false)
+            .focus_visible(false)
+            .modal(false)
             .build();
-
-        window.set_modal(false);
-        window.set_focusable(false);
-        window.set_focus_visible(false);
 
         // Set up CSS for transparency and styling
         let css_provider = gtk::CssProvider::new();
         let css_content = format!(
             "window {{
-                background-color: rgba(0, 0, 0, {});
+                background-color: transparent;
             }}
             picture {{
                 border: 2px solid white;
@@ -120,10 +120,9 @@ impl OverlayWindow {
                 padding: 2px 5px;
                 margin: 2px;
                 font-weight: bold;
-                font-size: 11px;
+                font-size: 50px;
                 border-radius: 3px;
-            }}",
-            config.opacity
+            }}"
         );
         css_provider.load_from_string(&css_content);
 
@@ -135,9 +134,10 @@ impl OverlayWindow {
 
         // Create image widget for displaying screen capture
         let image_widget = gtk::Picture::new();
-        image_widget.set_halign(gtk::Align::Center);
-        image_widget.set_valign(gtk::Align::Center);
-        image_widget.set_size_request(config.width, config.height);
+        image_widget.set_halign(gtk::Align::End);
+        image_widget.set_valign(gtk::Align::Start);
+        image_widget.set_size_request(AREA_WIDTH, AREA_HEIGHT);
+        image_widget.set_child_visible(config.show_debug_window);
 
         // Create overlay container
         let overlay_container = gtk::Overlay::new();
@@ -153,11 +153,16 @@ impl OverlayWindow {
 
         // Create vertical box for icon labels (top-right)
         let icon_labels_box = gtk::Box::new(gtk::Orientation::Vertical, 2);
-        icon_labels_box.set_halign(gtk::Align::End);
-        icon_labels_box.set_valign(gtk::Align::Start);
+        icon_labels_box.set_halign(gtk::Align::Center);
+        icon_labels_box.set_valign(gtk::Align::Center);
         icon_labels_box.set_margin_end(5);
         icon_labels_box.set_margin_top(5);
         overlay_container.add_overlay(&icon_labels_box);
+
+        let label = gtk::Label::new(None);
+        label.add_css_class("icon-label");
+        label.set_xalign(0.0);
+        icon_labels_box.append(&label);
 
         // Add overlay container to window
         window.set_child(Some(&overlay_container));
@@ -165,22 +170,16 @@ impl OverlayWindow {
         Ok(Self {
             window,
             image_widget,
-            overlay_container,
+            _overlay_container: overlay_container,
             text_labels_box,
             icon_labels_box,
+            label,
             config,
         })
     }
 
     pub fn show(&self) {
         self.window.present();
-
-        // Set window position if specified (non-zero values)
-        if self.config.x_position != 0 || self.config.y_position != 0 {
-            // Note: On Wayland, window positioning is limited for security reasons
-            // This may not work as expected on all compositors
-            log::warn!("Window positioning on Wayland may be limited by the compositor");
-        }
 
         // Make window input-transparent (non-clickable)
         if let Some(surface) = self.window.surface() {
@@ -191,16 +190,25 @@ impl OverlayWindow {
 
         // Send ALT+Space after a short delay
         glib::timeout_add_local_once(std::time::Duration::from_millis(500), || {
-            std::thread::spawn(|| {
-                if let Ok(mut enigo) = Enigo::new(&Settings::default()) {
-                    // Send ALT+Space combination
-                    let _ = enigo.key(Key::Alt, enigo::Direction::Press);
-                    let _ = enigo.key(Key::Space, enigo::Direction::Press);
-                    let _ = enigo.key(Key::Space, enigo::Direction::Release);
-                    let _ = enigo.key(Key::Alt, enigo::Direction::Release);
-                }
-            });
+            if let Ok(mut enigo) = Enigo::new(&Settings::default()) {
+                // Send ALT+Space combination
+                let _ = enigo.key(Key::Alt, enigo::Direction::Press);
+                let _ = enigo.key(Key::Space, enigo::Direction::Press);
+                let _ = enigo.key(Key::Space, enigo::Direction::Release);
+                let _ = enigo.key(Key::Alt, enigo::Direction::Release);
+            }
         });
+
+        // glib::timeout_add_local_once(std::time::Duration::from_millis(2000), || {
+        //     if let Ok(mut enigo) = Enigo::new(&Settings::default()) {
+        //         let _ = enigo.key(Key::Tab, enigo::Direction::Click);
+        //     }
+        // });
+        // glib::timeout_add_local_once(std::time::Duration::from_millis(2050), || {
+        //     if let Ok(mut enigo) = Enigo::new(&Settings::default()) {
+        //         let _ = enigo.key(Key::Unicode('q'), enigo::Direction::Click);
+        //     }
+        // });
     }
 
     pub fn update_image_from_processed_frame(&self, frame: ProcessedFrame) {
@@ -208,9 +216,9 @@ impl OverlayWindow {
         while let Some(child) = self.text_labels_box.first_child() {
             self.text_labels_box.remove(&child);
         }
-        while let Some(child) = self.icon_labels_box.first_child() {
-            self.icon_labels_box.remove(&child);
-        }
+
+        let mut is_idle = false;
+        let mut is_pop = false;
 
         // Add text detection labels
         for detected_text in &frame.analysis.detected_texts {
@@ -224,39 +232,67 @@ impl OverlayWindow {
             label.add_css_class("stat-label");
             label.set_xalign(0.0);
             self.text_labels_box.append(&label);
+            if detected_text.text_type == TextType::Idle
+                && detected_text.text.parse::<i32>().unwrap_or_default() > 0
+            {
+                is_idle = true;
+            } else if detected_text.text_type == TextType::Population {
+                let mut parts = detected_text.text.split("/");
+                let current = parts
+                    .next()
+                    .unwrap_or_default()
+                    .parse::<i32>()
+                    .unwrap_or_default();
+                let total = parts
+                    .next()
+                    .unwrap_or_default()
+                    .parse::<i32>()
+                    .unwrap_or_default();
+                if total > 0 && current + 2 >= total {
+                    is_pop = true;
+                }
+            }
         }
 
         // Add icon detection labels
-        for detected_icon in &frame.analysis.detected_icons {
-            let label_text = format!(
-                "{} ({:.0}%)",
-                detected_icon.name,
-                detected_icon.confidence * 100.0
-            );
-            let label = gtk::Label::new(Some(&label_text));
-            label.add_css_class("icon-label");
-            label.set_xalign(0.0);
-            self.icon_labels_box.append(&label);
+        let has_villager = frame
+            .analysis
+            .detected_icons
+            .iter()
+            .any(|f| f.icon_type == crate::image_analyzer::IconType::Villager);
+
+        if is_pop {
+            self.label.set_text("Haus!");
+            self.label.set_child_visible(true);
+        } else if is_idle {
+            self.label.set_text("Idle!");
+            self.label.set_child_visible(true);
+        } else if !has_villager {
+            self.label.set_text("Villager!");
+            self.label.set_child_visible(true);
+        } else {
+            self.label.set_child_visible(false);
         }
 
-        // Crop to region of interest (bottom 500px)
-        let pixbuf = frame.original.to_pixbuf();
-        let crop_height = pixbuf.height().min(500);
-        let crop_width = pixbuf.width().min(300);
-        let pixbuf = pixbuf.new_subpixbuf(
-            0,
-            pixbuf.height() - crop_height,
-            crop_width,
-            crop_height,
-        );
+        if self.config.show_debug_window {
+            // Crop to region of interest (bottom 500px)
+            let pixbuf = frame.original.to_pixbuf();
+            let crop_height = pixbuf.height().min(500);
+            let crop_width = pixbuf.width().min(300);
+            let pixbuf =
+                pixbuf.new_subpixbuf(0, pixbuf.height() - crop_height, crop_width, crop_height);
 
-        if let Some(scaled_pixbuf) = pixbuf.scale_simple(
-            self.config.width,
-            self.config.height,
-            gdk_pixbuf::InterpType::Bilinear,
-        ) {
-            let texture = gdk::Texture::for_pixbuf(&scaled_pixbuf);
+            let texture = gdk::Texture::for_pixbuf(&pixbuf);
             self.image_widget.set_paintable(Some(&texture));
+            //
+            // if let Some(scaled_pixbuf) = pixbuf.scale_simple(
+            //     self.config.width,
+            //     self.config.height,
+            //     gdk_pixbuf::InterpType::Bilinear,
+            // ) {
+            //     let texture = gdk::Texture::for_pixbuf(&scaled_pixbuf);
+            //     self.image_widget.set_paintable(Some(&texture));
+            // }
         }
     }
 }
