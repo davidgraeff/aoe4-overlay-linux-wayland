@@ -1,12 +1,11 @@
 use crate::{
-    image_analyzer::{AnalysisResult, ImageAnalyzer},
-    overlay_window_gtk::PixbufWrapper,
+    image_analyzer::{AnalysisResult, ImageAnalyzer, OCRModel},
+    pixelbuf_wrapper::{PixbufWrapper, PixelBufWrapperWithDroppedFramesTS},
 };
-use anyhow::{anyhow, Result};
+use anyhow::{Result, anyhow};
 use aoe4_overlay::consts::{AREA_HEIGHT, AREA_WIDTH};
 use log::{debug, error, info};
 use opencv::core::{Mat, MatTraitConst, Rect};
-use crate::image_analyzer::OCRModel;
 
 /// Frame data with original image and analysis results
 #[derive(Clone)]
@@ -25,30 +24,41 @@ unsafe impl Send for FrameProcessor {}
 impl FrameProcessor {
     pub fn new() -> Result<Self> {
         let analyzer = ImageAnalyzer::new()?;
-        Ok(Self {
-            analyzer,
-        })
+        Ok(Self { analyzer })
     }
 
     /// Start processing frames from input channel and send results to output channel
     pub fn start_processing(
         self,
-        frame_rx: std::sync::mpsc::Receiver<PixbufWrapper>,
+        frame_rx: std::sync::mpsc::Receiver<bool>,
+        frame_rx_content: PixelBufWrapperWithDroppedFramesTS,
         processed_tx: std::sync::mpsc::SyncSender<ProcessedFrame>,
-    )  -> Result<()>  {
+    ) -> Result<()> {
         info!("Frame processor started");
         let mut analyzer = self.analyzer.into_inner().ok_or_else(|| anyhow!(""))?;
 
         let mut frame_count = 0u64;
         let mut processed_count = 0u64;
-        let mut dropped_count = 0u64;
+        let mut dropped_count = 0u32;
+        let mut frame = PixbufWrapper::default();
 
-        while let Ok(frame) = frame_rx.recv() {
-            if frame.bgr_buffer.is_empty() {
+        while let Ok(has_data) = frame_rx.recv() {
+            if !has_data {
                 info!("Received quit signal, stopping frame processor");
                 break;
             }
+            let mut content = frame_rx_content.lock().unwrap();
+            if content.pixbuf.bgr_buffer.is_empty() || content.frames_written == 0 {
+                debug!("No frame available, skipping");
+                continue;
+            }
             frame_count += 1;
+            let dropped_frames = content.frames_written - 1;
+            content.frames_written = 0; // reset counter
+            frame.copy_from_pixbuf(&content.pixbuf);
+            drop(content);
+
+            dropped_count += dropped_frames;
 
             let cv_type = opencv::core::CV_MAKETYPE(8, 4);
             let r = unsafe {
@@ -76,7 +86,7 @@ impl FrameProcessor {
                     processed_count += 1;
 
                     let processed_frame = ProcessedFrame {
-                        original: frame,
+                        original: frame.clone(),
                         analysis,
                     };
 

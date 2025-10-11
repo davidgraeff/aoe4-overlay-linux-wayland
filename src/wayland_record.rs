@@ -1,14 +1,13 @@
-//use gst::prelude::*;
-use crate::{overlay_window_gtk::PixbufWrapper, pipewire_stream::PipeWireStream};
+use crate::{pipewire_stream::PipeWireStream};
 use anyhow::Result;
 use std::{
     collections::HashMap,
+    future::AsyncDrop,
+    pin::Pin,
     sync::{Arc, Mutex, mpsc::SyncSender},
     thread,
     thread::JoinHandle,
 };
-use std::future::AsyncDrop;
-use std::pin::Pin;
 use zbus::{
     Connection, MessageStream,
     export::ordered_stream::OrderedStreamExt,
@@ -30,6 +29,7 @@ pub enum CursorModeTypes {
 }
 
 use crate::dbus_portal_screen_cast::ScreenCastProxy;
+use crate::pixelbuf_wrapper::PixelBufWrapperWithDroppedFramesTS;
 
 enum PipewireMessage {
     Stop,
@@ -40,6 +40,7 @@ pub struct WaylandRecorder {
     connection: Connection,
     screen_cast_proxy: ScreenCastProxy<'static>,
     session_path: String,
+    restore_token: Option<String>,
     id: OwnedValue,
     stream_node_id: Arc<Mutex<Option<u32>>>,
     pw_thread: Option<JoinHandle<()>>,
@@ -65,6 +66,7 @@ impl WaylandRecorder {
             stream_node_id: Arc::new(Mutex::new(None)),
             pw_thread: None,
             pw_sender,
+            restore_token: None,
         })
     }
 
@@ -72,13 +74,19 @@ impl WaylandRecorder {
         &mut self,
         record_type: RecordTypes,
         cursor_mode_type: CursorModeTypes,
-        sender: SyncSender<PixbufWrapper>
+        sender: SyncSender<bool>,
+        image_sender_content: PixelBufWrapperWithDroppedFramesTS
     ) -> bool {
         let (pw_sender, pw_receiver) = pipewire::channel::channel::<PipewireMessage>();
         self.pw_sender = pw_sender;
 
+        if let Ok(restore_token) = std::fs::read_to_string("restore_token.txt")  {
+            self.restore_token = Some(restore_token);
+            log::info!("Loaded restore token from file");
+        }
+
         let pw_thread = thread::spawn(move || {
-            let pipewire_stream = PipeWireStream::new(sender).unwrap();
+            let pipewire_stream = PipeWireStream::new(sender, image_sender_content).unwrap();
             let mainloop = pipewire_stream.main_loop.clone();
             let mainloop_clone = pipewire_stream.main_loop.clone();
             let pipewire_stream_arc = Arc::new(Mutex::new(pipewire_stream));
@@ -142,6 +150,14 @@ impl WaylandRecorder {
                     }
 
                     if response.contains_key("streams") {
+                        if let Some(restore_token) = response.get("restore_token") {
+                            let restore_token = restore_token
+                                .downcast_ref::<&str>()
+                                .expect("cannot down cast restore_token to &str");
+                            self.restore_token = Some(restore_token.to_string());
+                            log::info!("Got restore token: {}", restore_token);
+                            std::fs::write("restore_token.txt", restore_token).expect("unable to write restore token file");
+                        }
                         self.record_screen_cast(response.clone())
                             .await
                             .expect("failed to record screen cast");
@@ -170,7 +186,7 @@ impl WaylandRecorder {
                 "Closing session...: {:?}",
                 self.session_path.replace("request", "session")
             );
-            self.connection
+            if let Err(err) = self.connection
                 .clone()
                 .call_method(
                     Some("org.freedesktop.portal.Desktop"),
@@ -179,8 +195,9 @@ impl WaylandRecorder {
                     "Close",
                     &(),
                 )
-                .await
-                .expect("failed to close session");
+                .await {
+                log::error!("Failed to close session: {}", err);
+            }
             self.session_path = String::new();
         }
     }
@@ -209,12 +226,26 @@ impl WaylandRecorder {
             CursorModeTypes::Hidden => Value::from(1u32),
             CursorModeTypes::Show => Value::from(2u32),
         };
+        let multiple_value: Value = Value::from(false);
+        let persist_mode_value: Value = Value::from(2u32);
         let id_value = Value::from(self.id.clone());
-        let option_map: HashMap<&str, &Value> = HashMap::from([
+        let mut option_map: HashMap<&str, &Value> = HashMap::from([
             ("handle_token", &id_value),
             ("types", &types_value),
             ("cursor_mode", &cursor_mode_value),
+            ("multiple", &multiple_value),
+            ("persist_mode", &persist_mode_value),
         ]);
+
+        let (restore_token, has_restore_token) =if let Some(restore_token) = &self.restore_token {
+            (Value::from(restore_token.clone()), true)
+        } else {
+            (Value::from(""), false)
+        };
+
+        if has_restore_token {
+            option_map.insert("restore_token", &restore_token);
+        }
 
         screen_cast_proxy
             .select_sources(
@@ -224,7 +255,7 @@ impl WaylandRecorder {
             .await?;
 
         let id_value = Value::from(self.id.clone());
-        screen_cast_proxy
+        let _response = screen_cast_proxy
             .start(
                 &ObjectPath::try_from(response_session_handle.clone())?,
                 "parent_window",

@@ -35,19 +35,8 @@ impl ProcessMonitor {
                         if let Ok(stat) = process.stat() {
                             // Check both comm (command name) and cmdline (full command line)
                             if stat.comm.contains(&self.process_name) {
-                                debug!("Found process: {} (pid: {})", stat.comm, process.pid);
+                                //debug!("Found process: {} (pid: {})", stat.comm, process.pid);
                                 return true;
-                            }
-
-                            // Also check cmdline for full path matches
-                            if let Ok(cmdline) = process.cmdline() {
-                                if cmdline.iter().any(|arg| arg.contains(&self.process_name)) {
-                                    debug!(
-                                        "Found process in cmdline: {:?} (pid: {})",
-                                        cmdline, process.pid
-                                    );
-                                    return true;
-                                }
                             }
                         }
                     }

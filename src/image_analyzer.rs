@@ -16,7 +16,7 @@ use opencv::{
 };
 use rayon::{
     iter::{IntoParallelRefMutIterator, ParallelIterator},
-    prelude::{IndexedParallelIterator},
+    prelude::IndexedParallelIterator,
 };
 use rust_paddle_ocr::Rec as PPRec;
 use std::{
@@ -25,37 +25,27 @@ use std::{
     sync::{Arc, Mutex},
     time::Duration,
 };
-use crate::consts::TextType;
 
-#[derive(Debug, Clone, Default)]
-pub struct DetectedText {
-    pub text: String,
-    pub confidence: f32,
-    #[allow(dead_code)]
-    pub bbox: Rect,
-    #[allow(dead_code)]
-    pub stat_name: &'static str,
-    pub text_type: TextType,
-}
+// #[derive(Debug, Clone, Default)]
+// pub struct DetectedText {
+//     pub text: String,
+//     pub confidence: f32,
+//     #[allow(dead_code)]
+//     pub bbox: Rect,
+//     #[allow(dead_code)]
+//     pub stat_name: &'static str,
+//     pub text_type: TextType,
+// }
 
-#[derive(Debug, Clone, PartialEq)]
-pub enum IconType {
-    Villager,
-}
-
-#[allow(dead_code)]
-#[derive(Debug, Clone)]
-pub struct DetectedIcon {
-    pub icon_type: IconType,
-    pub name: &'static str,
-    pub bbox: Rect,
-    pub confidence: f64,
-}
+// #[derive(Debug, Clone, PartialEq)]
+// pub enum IconType {
+//     Villager,
+// }
 
 #[derive(Debug, Clone)]
 pub struct AnalysisResult {
-    pub detected_texts: Vec<DetectedText>,
-    pub detected_icons: Vec<DetectedIcon>,
+    pub detected_texts: [String; AOE4_STATS_POS.len()],
+    pub has_villager_icon: bool,
     pub detect_villager_time: Duration,
     pub convert_color_time: Duration,
     pub ocr_time: Duration,
@@ -145,7 +135,7 @@ impl ImageAnalyzerInner {
 
         // OpenCV Mat is in BGR format, convert to grayscale and then to RGB
         let mut rgb_mat = Mat::default();
-        let detected_icons = if cv_mat.channels() == 4 {
+        let has_villager_icon = if cv_mat.channels() == 4 {
             imgproc::cvt_color(
                 &cv_mat,
                 &mut rgb_mat,
@@ -153,9 +143,9 @@ impl ImageAnalyzerInner {
                 0,
                 AlgorithmHint::ALGO_HINT_DEFAULT,
             )?;
-            self.detect_villager_icon(&rgb_mat)?
+            self.detect_icon(&rgb_mat, &self.villager_icon_template)?
         } else {
-            self.detect_villager_icon(&cv_mat)?
+            self.detect_icon(&cv_mat, &self.villager_icon_template)?
         };
         let detect_villager_time = now.elapsed();
 
@@ -195,21 +185,72 @@ impl ImageAnalyzerInner {
         let detected_texts = match ocrmodel {
             OCRModel::PP => self.extract_text_with_ocr_pp(img)?,
             OCRModel::ONNX => self.extract_text_with_ocr(img)?,
-            OCRModel::OnnxPar => self.extract_text_with_ocr_par(img)?
+            OCRModel::OnnxPar => self.extract_text_with_ocr_par(img)?,
         };
+        // let detected_texts = self.extract_text_with_tesseract(img)?;
 
         let ocr_time = now.elapsed() - convert_color_time - detect_villager_time;
+        log::info!("OCR time: {:?}", ocr_time);
 
         Ok(AnalysisResult {
             detected_texts,
-            detected_icons,
+            has_villager_icon,
             detect_villager_time,
             convert_color_time,
             ocr_time,
         })
     }
 
-    fn extract_text_with_ocr_pp(&mut self, img: RgbImage) -> Result<Vec<DetectedText>> {
+    fn extract_text_with_tesseract(&self, img: RgbImage) -> Result<[String; AOE4_STATS_POS.len()]> {
+        let image_height = img.height() as f32;
+
+        let subviews = AOE4_STATS_POS
+            .iter()
+            .map(|stat_pos| {
+                let y = image_height + stat_pos.y;
+                img.view(
+                    stat_pos.x as u32,
+                    y as u32,
+                    STAT_RECT.width,
+                    STAT_RECT.height,
+                )
+                .to_image()
+            })
+            .collect::<Vec<_>>();
+
+        let mut buf = Vec::new();
+
+        let mut detected_texts: [String; AOE4_STATS_POS.len()] = Default::default();
+        for i in 0..detected_texts.len() {
+            let stat_pos = &AOE4_STATS_POS[i];
+            buf.clear();
+            let writer = &mut std::io::Cursor::new(&mut buf);
+            subviews[i].write_to(writer, image::ImageFormat::Tiff)?;
+            let tess = tesseract::Tesseract::new(None, Some("eng"))?;
+            let mut tess = tess
+                .set_variable("tessedit_char_whitelist", "0123456789/")?
+                .set_image_from_mem(&buf)?
+                .set_source_resolution(70);
+            let ocr_result = tess.get_text()?;
+            if ocr_result.len() == 0 {
+                detected_texts[i] = String::new();
+                continue;
+            }
+
+            // If not OCR result is a number, set to "0"
+            if !ocr_result.is_empty() && ocr_result.chars().all(|c| c.is_ascii_digit() || c == '/')
+            {
+                detected_texts[i] = ocr_result.trim().to_string();
+            };
+        }
+
+        Ok(detected_texts)
+    }
+
+    fn extract_text_with_ocr_pp(
+        &mut self,
+        img: RgbImage,
+    ) -> Result<[String; AOE4_STATS_POS.len()]> {
         let image_height = img.height() as f32;
         //let now = std::time::Instant::now();
 
@@ -232,24 +273,7 @@ impl ImageAnalyzerInner {
         // let ocr_results = self.ocr_engine.predict(subviews, None)?;
         //let ocr_time = now.elapsed() - subview_time;
 
-        let mut detected_texts = Vec::with_capacity(AOE4_STATS_POS.len());
-        for stat_pos in AOE4_STATS_POS.iter() {
-            let y = image_height + stat_pos.y;
-            let result = DetectedText {
-                text_type: stat_pos.text_type,
-                stat_name: stat_pos.name,
-                text: "0".to_string(),
-                confidence: 0.0,
-                bbox: Rect {
-                    x: stat_pos.x as i32,
-                    y: y as i32,
-                    width: STAT_RECT.width as i32,
-                    height: STAT_RECT.height as i32,
-                },
-            };
-            detected_texts.push(result);
-        }
-
+        let mut detected_texts: [String; AOE4_STATS_POS.len()] = Default::default();
         (0..detected_texts.len()).into_iter().for_each(|i| {
             let (text, confidence) = self.rec.predict_with_confidence(&subviews[i]).unwrap();
             if text.len() == 0 {
@@ -258,8 +282,9 @@ impl ImageAnalyzerInner {
 
             // If not OCR result is a number, set to "0"
             if !text.is_empty() && text.chars().all(|c| c.is_ascii_digit() || c == '/') {
-                detected_texts[i].text = text;
-                detected_texts[i].confidence = confidence;
+                if confidence > 0.5 {
+                    detected_texts[i] = text;
+                }
             };
         });
 
@@ -274,8 +299,7 @@ impl ImageAnalyzerInner {
         Ok(detected_texts)
     }
 
-
-    fn extract_text_with_ocr(&self, img: RgbImage) -> Result<Vec<DetectedText>> {
+    fn extract_text_with_ocr(&self, img: RgbImage) -> Result<[String; AOE4_STATS_POS.len()]> {
         let image_height = img.height() as f32;
 
         let subviews = AOE4_STATS_POS
@@ -288,74 +312,44 @@ impl ImageAnalyzerInner {
                     STAT_RECT.width,
                     STAT_RECT.height,
                 )
-                    .to_image()
+                .to_image()
             })
             .collect::<Vec<_>>();
 
         let ocr_results = self.ocr_engine.predict(subviews, None)?;
 
-        let mut detected_texts = Vec::new();
-        for (i, stat_pos) in AOE4_STATS_POS.iter().enumerate() {
-            let y = image_height + stat_pos.y;
-            let mut result = DetectedText {
-                stat_name: stat_pos.name,
-                text: "0".to_string(),
-                confidence: 0.0,
-                bbox: Rect {
-                    x: stat_pos.x as i32,
-                    y: y as i32,
-                    width: STAT_RECT.width as i32,
-                    height: STAT_RECT.height as i32,
-                },
-                text_type: stat_pos.text_type,
-            };
+        let mut detected_texts: [String; AOE4_STATS_POS.len()] = Default::default();
+        for i in 0..detected_texts.len() {
             let ocr_result = ocr_results.rec_text[i].clone();
             if ocr_result.len() == 0 {
-                detected_texts.push(result);
+                detected_texts[i] = String::new();
                 continue;
             }
 
-            let ocr1_result = ocr_result.to_string();
+            // let ocr1_result = ocr_result.to_string();
             // If not OCR result is a number, set to "0"
-            if !ocr1_result.is_empty()
-                && ocr1_result.chars().all(|c| c.is_ascii_digit() || c == '/')
+            if !ocr_result.is_empty() && ocr_result.chars().all(|c| c.is_ascii_digit() || c == '/')
             {
-                result.text = ocr1_result;
-                result.confidence = ocr_results.rec_score[i];
+                detected_texts[i] = ocr_result.to_string();
+                // result.text = ocr1_result;
+                // result.confidence = ocr_results.rec_score[i];
             };
-            detected_texts.push(result);
         }
 
         Ok(detected_texts)
     }
 
-    fn extract_text_with_ocr_par(&self, img: RgbImage) -> Result<Vec<DetectedText>> {
+    fn extract_text_with_ocr_par(&self, img: RgbImage) -> Result<[String; AOE4_STATS_POS.len()]> {
         let image_height = img.height() as f32;
         let now = std::time::Instant::now();
 
-        let mut detected_texts = Vec::with_capacity(AOE4_STATS_POS.len());
-        for stat_pos in AOE4_STATS_POS.iter() {
-            let y = image_height + stat_pos.y;
-            let result = DetectedText {
-                stat_name: stat_pos.name,
-                text: "0".to_string(),
-                confidence: 0.0,
-                bbox: Rect {
-                    x: stat_pos.x as i32,
-                    y: y as i32,
-                    width: STAT_RECT.width as i32,
-                    height: STAT_RECT.height as i32,
-                },
-                text_type: stat_pos.text_type,
-            };
-            detected_texts.push(result);
-        }
+        let mut detected_texts: [String; AOE4_STATS_POS.len()] = Default::default();
 
         let engine = self.ocr_engine.clone();
         detected_texts
             .par_iter_mut()
             .zip(&AOE4_STATS_POS)
-            .for_each(|(entry, stat_pos)| {
+            .for_each(|(mut entry, stat_pos)| {
                 let y = image_height + stat_pos.y;
                 let subview = img
                     .view(
@@ -368,17 +362,21 @@ impl ImageAnalyzerInner {
 
                 let ocr_results = engine.predict(vec![subview], None);
                 if ocr_results.is_err() {
+                    entry.clear();
                     return;
                 }
                 let ocr_results = ocr_results.unwrap();
 
-                let ocr1_result = ocr_results.rec_text[0].to_string();
+                let mut ocr1_result = ocr_results.rec_text[0].to_string();
                 // If not OCR result is a number, set to "0"
                 if !ocr1_result.is_empty()
                     && ocr1_result.chars().all(|c| c.is_ascii_digit() || c == '/')
                 {
-                    entry.text = ocr1_result;
-                    entry.confidence = ocr_results.rec_score[0];
+                    if ocr_results.rec_score[0] > 0.5 {
+                        entry = &mut ocr1_result;
+                    }
+                    //entry = ocr1_result;
+                    //entry.confidence = ocr_results.rec_score[0];
                 };
             });
 
@@ -395,9 +393,7 @@ impl ImageAnalyzerInner {
     /// * `img`: &Mat - Input image in BGR format
     ///
     /// returns: Result<Vec<DetectedIcon, Global>, Error>
-    fn detect_villager_icon(&self, img: &Mat) -> Result<Vec<DetectedIcon>> {
-        let mut detected_icons = Vec::new();
-
+    fn detect_icon(&self, img: &Mat, detect_icon: &Mat) -> Result<bool> {
         let img_height = img.rows() as f32;
 
         // Calculate search area
@@ -413,7 +409,7 @@ impl ImageAnalyzerInner {
         let search_height = search_height.min(img.rows() - search_y);
 
         if search_width <= 0 || search_height <= 0 {
-            return Ok(detected_icons);
+            return Ok(false);
         }
 
         // Extract ROI
@@ -426,7 +422,7 @@ impl ImageAnalyzerInner {
         let mut result = Mat::default();
         imgproc::match_template(
             &roi,
-            &self.villager_icon_template,
+            detect_icon,
             &mut result,
             imgproc::TM_CCOEFF_NORMED, // TM_CCORR_NORMED,
             &Mat::default(),
@@ -448,23 +444,24 @@ impl ImageAnalyzerInner {
         )?;
 
         let threshold = 0.6;
-        if max_val >= threshold {
-            let icon_x = search_x + max_loc.x;
-            let icon_y = search_y + max_loc.y;
-
-            detected_icons.push(DetectedIcon {
-                icon_type: IconType::Villager,
-                name: "Villager",
-                bbox: Rect::new(
-                    icon_x,
-                    icon_y,
-                    self.villager_icon_template.cols(),
-                    self.villager_icon_template.rows(),
-                ),
-                confidence: max_val,
-            });
-        }
-
-        Ok(detected_icons)
+        Ok(max_val >= threshold)
+        // if max_val >= threshold {
+        //     let icon_x = search_x + max_loc.x;
+        //     let icon_y = search_y + max_loc.y;
+        //
+        //     detected_icons.push(DetectedIcon {
+        //         icon_type: IconType::Villager,
+        //         name: "Villager",
+        //         bbox: Rect::new(
+        //             icon_x,
+        //             icon_y,
+        //             self.villager_icon_template.cols(),
+        //             self.villager_icon_template.rows(),
+        //         ),
+        //         confidence: max_val,
+        //     });
+        // }
+        //
+        // Ok(detected_icons)
     }
 }

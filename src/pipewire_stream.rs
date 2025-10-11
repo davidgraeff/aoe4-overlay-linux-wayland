@@ -1,4 +1,4 @@
-use crate::overlay_window_gtk::PixbufWrapper;
+use crate::pixelbuf_wrapper::{PixelBufWrapperWithDroppedFramesTS};
 use anyhow::Result;
 use pipewire::{
     context::Context,
@@ -33,12 +33,13 @@ pub struct PipeWireStream {
     context: Context,
     stream: Option<Stream>,
     listener: Option<StreamListener<UserData>>,
-    image_sender: mpsc::SyncSender<PixbufWrapper>,
+    image_sender: mpsc::SyncSender<bool>,
+    image_sender_content: PixelBufWrapperWithDroppedFramesTS,
 }
 
 impl PipeWireStream {
     /// Creates a new PipeWireStream instance.
-    pub fn new(image_sender: mpsc::SyncSender<PixbufWrapper>) -> Result<Self> {
+    pub fn new(image_sender: mpsc::SyncSender<bool>, image_sender_content: PixelBufWrapperWithDroppedFramesTS) -> Result<Self> {
         pipewire::init();
 
         let main_loop = MainLoop::new(None)?;
@@ -50,6 +51,7 @@ impl PipeWireStream {
             stream: None,
             listener: None,
             image_sender,
+            image_sender_content
         })
     }
 
@@ -69,6 +71,7 @@ impl PipeWireStream {
 
         // Clone sender for the callback
         let sender = self.image_sender.clone();
+        let image_sender_content = self.image_sender_content.clone();
 
         let user_data = UserData {
             last_time: SystemTime::now()
@@ -132,7 +135,7 @@ impl PipeWireStream {
                         .duration_since(UNIX_EPOCH)
                         .unwrap_or(Duration::from_secs(0))
                         .as_millis() as u64;
-                    if now.saturating_sub(user_data.last_time) < 200 {
+                    if now.saturating_sub(user_data.last_time) < 250 {
                         return;
                     }
                     user_data.last_time = now;
@@ -161,17 +164,20 @@ impl PipeWireStream {
                     log::error!("Invalid image dimensions: {}x{}", width, height);
                     return;
                 }
+                //
+                // let pixbuf_wrapper = PixbufWrapper {
+                //     bgr_buffer: Vec::from(&slice[..size]),
+                //     width,
+                //     height,
+                //     stride,
+                // };
 
-                let pixbuf_wrapper = PixbufWrapper {
-                    bgr_buffer: Vec::from(&slice[..size]),
-                    width,
-                    height,
-                    stride,
-                };
-
-                if let Err(e) = sender.try_send(pixbuf_wrapper) {
-                    log::error!("Pipeline thread: Buffer full: {}", e);
+                if let Ok(mut content) = image_sender_content.lock() {
+                    content.pixbuf.copy_from_slice(&slice[..size], width, height, stride);
+                    content.frames_written += 1;
                 }
+
+                let _ = sender.try_send(true);
             })
             .register()?;
 

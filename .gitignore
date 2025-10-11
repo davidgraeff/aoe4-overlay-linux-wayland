@@ -3,3 +3,5 @@ target
 *.swp
 *.orig
 settings.json
+
+restore_token.txt

@@ -42,6 +42,12 @@ pub trait ScreenCast {
     ) -> zbus::Result<zbus::zvariant::OwnedFd>;
 
     /// SelectSources method
+    /// Options: "handle_token": s (string)
+    ///          "types": u (uint32)
+    ///          "multiple": b (boolean)
+    ///          "cursor_mode": u (uint32)
+    ///          "persist_mode": u (uint32) 0: do not persist, 1: persist for session, 2: persist until revoked
+    ///          "restore_token": s (string)
     fn select_sources(
         &self,
         session_handle: &zbus::zvariant::ObjectPath<'_>,

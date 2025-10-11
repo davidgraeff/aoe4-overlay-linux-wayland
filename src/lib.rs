@@ -37,6 +37,9 @@ pub mod consts {
         Aoe4StatPos { x: 187.0, y: 366.0 + AREA_Y_OFFSET, name: "Gold Worker", text_type: TextType::Unassigned },
         Aoe4StatPos { x: 187.0, y: 419.0 + AREA_Y_OFFSET, name: "Stone Worker", text_type: TextType::Unassigned },
     ];
+
+    pub const INDEX_IDLE: usize = 5;
+    pub const INDEX_POP: usize = 0;
 }
 
 pub mod image_analyzer;

@@ -1,15 +1,11 @@
 use crate::{frame_processor::ProcessedFrame, system_menu::SystemTray};
 use anyhow::Result;
-use enigo::{Enigo, Key, Keyboard, Settings};
-use gdk::{gdk_pixbuf, gdk_pixbuf::Pixbuf};
-use gtk::{Label, cairo, glib, prelude::*};
-use std::sync::{
-    Arc,
-    atomic::{AtomicBool, Ordering},
-    mpsc::Receiver,
-};
+use gtk::{cairo, glib, prelude::*, Label};
+use std::sync::{atomic::{AtomicBool, Ordering}, mpsc::Receiver, Arc};
 
-use aoe4_overlay::consts::{AREA_HEIGHT, AREA_WIDTH, TextType};
+use aoe4_overlay::consts::{
+    AOE4_STATS_POS, AREA_HEIGHT, AREA_WIDTH, INDEX_IDLE, INDEX_POP,
+};
 use tokio::task;
 
 #[derive(Clone, Debug)]
@@ -29,44 +25,11 @@ pub struct OverlayWindow {
     window: gtk::Window,
     image_widget: gtk::Picture,
     _overlay_container: gtk::Overlay,
-    text_labels_box: gtk::Box,
-    icon_labels_box: gtk::Box,
+    _text_labels_box: gtk::Box,
+    _icon_labels_box: gtk::Box,
     config: OverlayConfig,
-    pub label: Label,
-}
-
-#[derive(Clone)]
-pub struct PixbufWrapper {
-    pub bgr_buffer: Vec<u8>,
-    pub width: i32,
-    pub height: i32,
-    pub stride: i32,
-}
-
-impl PixbufWrapper {
-    // Create an empty PixbufWrapper indicating to quit the processing thread
-    pub(crate) fn quit() -> PixbufWrapper {
-        PixbufWrapper {
-            bgr_buffer: vec![],
-            width: 0,
-            height: 0,
-            stride: 0,
-        }
-    }
-}
-
-impl PixbufWrapper {
-    pub fn to_pixbuf(self) -> Pixbuf {
-        Pixbuf::from_bytes(
-            &glib::Bytes::from(&self.bgr_buffer),
-            gdk_pixbuf::Colorspace::Rgb,
-            true, // no alpha
-            8,    // bits per sample
-            self.width,
-            self.height,
-            self.stride,
-        )
-    }
+    pub centered_label: Label,
+    pub labels: [Label; AOE4_STATS_POS.len()],
 }
 
 impl OverlayWindow {
@@ -151,6 +114,18 @@ impl OverlayWindow {
         text_labels_box.set_margin_top(5);
         overlay_container.add_overlay(&text_labels_box);
 
+        let mut labels: [gtk::Label; AOE4_STATS_POS.len()] = Default::default();
+        if config.show_debug_window {
+            for (index, stat) in aoe4_overlay::consts::AOE4_STATS_POS.iter().enumerate() {
+                let label_text = format!("{}: --", stat.name);
+                let label = gtk::Label::new(Some(&label_text));
+                label.add_css_class("stat-label");
+                label.set_xalign(0.0);
+                text_labels_box.append(&label);
+                labels[index] = label;
+            }
+        }
+
         // Create vertical box for icon labels (top-right)
         let icon_labels_box = gtk::Box::new(gtk::Orientation::Vertical, 2);
         icon_labels_box.set_halign(gtk::Align::Center);
@@ -159,10 +134,11 @@ impl OverlayWindow {
         icon_labels_box.set_margin_top(5);
         overlay_container.add_overlay(&icon_labels_box);
 
-        let label = gtk::Label::new(None);
-        label.add_css_class("icon-label");
-        label.set_xalign(0.0);
-        icon_labels_box.append(&label);
+        let centered_label = gtk::Label::new(None);
+        centered_label.add_css_class("icon-label");
+        centered_label.set_xalign(0.0);
+        //centered_label.set_visible(false);
+        icon_labels_box.append(&centered_label);
 
         // Add overlay container to window
         window.set_child(Some(&overlay_container));
@@ -171,9 +147,10 @@ impl OverlayWindow {
             window,
             image_widget,
             _overlay_container: overlay_container,
-            text_labels_box,
-            icon_labels_box,
-            label,
+            _text_labels_box: text_labels_box,
+            _icon_labels_box: icon_labels_box,
+            labels,
+            centered_label,
             config,
         })
     }
@@ -189,15 +166,15 @@ impl OverlayWindow {
         }
 
         // Send ALT+Space after a short delay
-        glib::timeout_add_local_once(std::time::Duration::from_millis(500), || {
-            if let Ok(mut enigo) = Enigo::new(&Settings::default()) {
-                // Send ALT+Space combination
-                let _ = enigo.key(Key::Alt, enigo::Direction::Press);
-                let _ = enigo.key(Key::Space, enigo::Direction::Press);
-                let _ = enigo.key(Key::Space, enigo::Direction::Release);
-                let _ = enigo.key(Key::Alt, enigo::Direction::Release);
-            }
-        });
+        // glib::timeout_add_local_once(std::time::Duration::from_millis(500), || {
+        //     if let Ok(mut enigo) = Enigo::new(&Settings::default()) {
+        //         // Send ALT+Space combination
+        //         let _ = enigo.key(Key::Alt, enigo::Direction::Press);
+        //         let _ = enigo.key(Key::Space, enigo::Direction::Press);
+        //         let _ = enigo.key(Key::Space, enigo::Direction::Release);
+        //         let _ = enigo.key(Key::Alt, enigo::Direction::Release);
+        //     }
+        // });
 
         // glib::timeout_add_local_once(std::time::Duration::from_millis(2000), || {
         //     if let Ok(mut enigo) = Enigo::new(&Settings::default()) {
@@ -212,69 +189,56 @@ impl OverlayWindow {
     }
 
     pub fn update_image_from_processed_frame(&self, frame: ProcessedFrame) {
-        // Clear existing labels
-        while let Some(child) = self.text_labels_box.first_child() {
-            self.text_labels_box.remove(&child);
-        }
+        let mut parts = frame.analysis.detected_texts[INDEX_POP].split("/");
+        let current = parts
+            .next()
+            .unwrap_or_default()
+            .parse::<i32>()
+            .unwrap_or_default();
+        let total = parts
+            .next()
+            .unwrap_or_default()
+            .parse::<i32>()
+            .unwrap_or_default();
+        let is_useful = total > 0;
 
-        let mut is_idle = false;
-        let mut is_pop = false;
+        if !is_useful {
+            self.centered_label.set_text("");
+        } else {
+            let is_pop = current + 2 >= total;
+            let is_idle = frame.analysis.detected_texts[INDEX_IDLE]
+                .parse::<i32>()
+                .unwrap_or_default()
+                > 0;
+            let has_villager = frame.analysis.has_villager_icon;
 
-        // Add text detection labels
-        for detected_text in &frame.analysis.detected_texts {
-            let label_text = format!(
-                "{}: {} ({:.0}%)",
-                detected_text.stat_name,
-                detected_text.text,
-                detected_text.confidence * 100.0
-            );
-            let label = gtk::Label::new(Some(&label_text));
-            label.add_css_class("stat-label");
-            label.set_xalign(0.0);
-            self.text_labels_box.append(&label);
-            if detected_text.text_type == TextType::Idle
-                && detected_text.text.parse::<i32>().unwrap_or_default() > 0
-            {
-                is_idle = true;
-            } else if detected_text.text_type == TextType::Population {
-                let mut parts = detected_text.text.split("/");
-                let current = parts
-                    .next()
-                    .unwrap_or_default()
-                    .parse::<i32>()
-                    .unwrap_or_default();
-                let total = parts
-                    .next()
-                    .unwrap_or_default()
-                    .parse::<i32>()
-                    .unwrap_or_default();
-                if total > 0 && current + 2 >= total {
-                    is_pop = true;
-                }
+            if is_pop {
+                self.centered_label.set_text("Haus!");
+                //self.centered_label.set_visible(true);
+            } else if is_idle {
+                self.centered_label.set_text("Idle!");
+                //self.centered_label.set_visible(true);
+            } else if !has_villager {
+                self.centered_label.set_text("Villager!");
+                //self.centered_label.set_visible(true);
+            } else {
+                self.centered_label.set_text("");
+                // self.centered_label.set_visible(false);
+                // self.centered_label.set_child_visible(false);
             }
         }
 
-        // Add icon detection labels
-        let has_villager = frame
-            .analysis
-            .detected_icons
-            .iter()
-            .any(|f| f.icon_type == crate::image_analyzer::IconType::Villager);
-
-        if is_pop {
-            self.label.set_text("Haus!");
-            self.label.set_child_visible(true);
-        } else if is_idle {
-            self.label.set_text("Idle!");
-            self.label.set_child_visible(true);
-        } else if !has_villager {
-            self.label.set_text("Villager!");
-            self.label.set_child_visible(true);
-        } else {
-            self.label.set_child_visible(false);
-        }
-
         if self.config.show_debug_window {
+            for (index, stat) in AOE4_STATS_POS.iter().enumerate() {
+                let text = &frame.analysis.detected_texts[index];
+                let label = &self.labels[index];
+                if text.is_empty() || text == "--" {
+                    label.set_text(&format!("{}: --", stat.name));
+                } else {
+                    label.set_text(&format!("{}: {}", stat.name, text));
+                }
+            }
+
             // Crop to region of interest (bottom 500px)
             let pixbuf = frame.original.to_pixbuf();
             let crop_height = pixbuf.height().min(500);

@@ -2,22 +2,21 @@
 #![feature(async_drop)]
 
 use crate::{
-    overlay_window_gtk::{OverlayConfig, PixbufWrapper, run_async_with_image_receiver},
+    frame_processor::ProcessedFrame,
+    overlay_window_gtk::{run_async_with_image_receiver, OverlayConfig},
     process_monitor::WaitForProcessResult,
     system_tray::{Base, Menu},
-    frame_processor::ProcessedFrame,
 };
 use anyhow::Result;
 use clap::Parser;
-use libappindicator_zbus::{
-    tray,
-    utils::{Category},
-};
+use libappindicator_zbus::{tray, utils::Category};
 use log::{error, info};
-use std::sync::mpsc as std_mpsc;
+use std::sync::{mpsc as std_mpsc};
 use tokio::signal;
 
 mod dbus_portal_screen_cast;
+mod frame_processor;
+mod image_analyzer;
 mod overlay_window_gtk;
 mod pipewire_stream;
 mod process_monitor;
@@ -25,9 +24,10 @@ mod system_menu;
 mod system_tray;
 mod utils;
 mod wayland_record;
-mod frame_processor;
-mod image_analyzer;
+mod pixelbuf_wrapper;
+
 pub use aoe4_overlay::consts;
+use crate::pixelbuf_wrapper::PixelBufWrapperWithDroppedFramesTS;
 
 /// AOE4 Overlay - Screen capture and overlay for Age of Empires IV
 #[derive(Parser, Debug)]
@@ -43,11 +43,11 @@ struct Args {
     debug_window: bool,
 
     /// Process name to monitor (if set, capture only starts when this process is running)
-    #[arg(short = 'p', long)]
+    #[arg(short = 'p', long, default_value = "RelicCardinal.")]
     process_name: Option<String>,
 
     /// Process check interval in milliseconds
-    #[arg(short = 'i', long, default_value = "1000")]
+    #[arg(short = 'i', long, default_value = "3000")]
     check_interval: u64,
 }
 
@@ -94,12 +94,15 @@ async fn main() -> Result<()> {
 
     // Create std_mpsc channel for GTK (since GTK needs to run in its own thread)
     let (gtk_sender, gtk_receiver) = std_mpsc::sync_channel::<ProcessedFrame>(2);
-    let (pipewire_sender, pipewire_receiver) = std_mpsc::sync_channel::<PixbufWrapper>(2);
+    let (pipewire_sender, pipewire_receiver) = std_mpsc::sync_channel::<bool>(1);
+
+    let pixelbuf_content = PixelBufWrapperWithDroppedFramesTS::default();
+    let pixelbuf_content_clone = pixelbuf_content.clone();
 
     // Run image processing in a separate thread. Quit by sending an empty frame.
     let quit_processing_frame = pipewire_sender.clone();
-    let processor_handle = std::thread::spawn(move ||{
-        let _ = frame_processor.start_processing(pipewire_receiver, gtk_sender);
+    let processor_handle = std::thread::spawn(move || {
+        let _ = frame_processor.start_processing(pipewire_receiver, pixelbuf_content, gtk_sender);
     });
 
     let process_monitor = process_monitor::ProcessMonitor::new(
@@ -119,7 +122,8 @@ async fn main() -> Result<()> {
             result = process_monitor.wait_for_process(should_quit_process_monitor) => {
                 match result {
                     WaitForProcessResult::ProcessFound => {
-                        if !wayland_recorder.start(record_type, wayland_record::CursorModeTypes::Hidden, pipewire_sender).await {
+                        if !wayland_recorder.start(record_type, wayland_record::CursorModeTypes::Hidden, pipewire_sender, pixelbuf_content_clone).await {
+                            should_quit_ctrl_c.store(true, std::sync::atomic::Ordering::Relaxed);
                             error!("Failed to start Wayland recorder");
                         }
                     }
@@ -140,10 +144,16 @@ async fn main() -> Result<()> {
         }
     } else {
         if !wayland_recorder
-            .start(record_type, wayland_record::CursorModeTypes::Hidden, pipewire_sender)
+            .start(
+                record_type,
+                wayland_record::CursorModeTypes::Hidden,
+                pipewire_sender,
+                pixelbuf_content_clone
+            )
             .await
         {
             error!("Failed to start Wayland recorder");
+            should_quit_ctrl_c.store(true, std::sync::atomic::Ordering::Relaxed);
         }
     }
 
@@ -201,7 +211,7 @@ async fn main() -> Result<()> {
     }
 
     wayland_recorder.stop().await;
-    quit_processing_frame.send(PixbufWrapper::quit())?;
+    quit_processing_frame.send(false)?;
     let _ = processor_handle.join();
     info!("Done");
 
