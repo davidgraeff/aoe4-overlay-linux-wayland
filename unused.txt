@@ -1,0 +1,21 @@
+        // Send ALT+Space after a short delay
+        // glib::timeout_add_local_once(std::time::Duration::from_millis(500), || {
+        //     if let Ok(mut enigo) = Enigo::new(&Settings::default()) {
+        //         // Send ALT+Space combination
+        //         let _ = enigo.key(Key::Alt, enigo::Direction::Press);
+        //         let _ = enigo.key(Key::Space, enigo::Direction::Press);
+        //         let _ = enigo.key(Key::Space, enigo::Direction::Release);
+        //         let _ = enigo.key(Key::Alt, enigo::Direction::Release);
+        //     }
+        // });
+
+        // glib::timeout_add_local_once(std::time::Duration::from_millis(2000), || {
+        //     if let Ok(mut enigo) = Enigo::new(&Settings::default()) {
+        //         let _ = enigo.key(Key::Tab, enigo::Direction::Click);
+        //     }
+        // });
+        // glib::timeout_add_local_once(std::time::Duration::from_millis(2050), || {
+        //     if let Ok(mut enigo) = Enigo::new(&Settings::default()) {
+        //         let _ = enigo.key(Key::Unicode('q'), enigo::Direction::Click);
+        //     }
+        // });

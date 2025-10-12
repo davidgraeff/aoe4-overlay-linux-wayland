@@ -1,12 +1,11 @@
 use crate::{frame_processor::ProcessedFrame, system_menu::SystemTray};
 use anyhow::Result;
-use gtk::{cairo, glib, prelude::*, Label};
-use std::sync::{atomic::{AtomicBool, Ordering}, mpsc::Receiver, Arc};
-
-use aoe4_overlay::consts::{
-    AOE4_STATS_POS, AREA_HEIGHT, AREA_WIDTH, INDEX_IDLE, INDEX_POP,
+use aoe4_overlay::consts::{AOE4_STATS_POS, AREA_HEIGHT, AREA_WIDTH, INDEX_IDLE, INDEX_POP};
+use gtk::{Application, Button, IconTheme, Label, cairo, glib, prelude::*};
+use tokio::{
+    sync::mpsc::{Receiver, Sender},
+    task,
 };
-use tokio::task;
 
 #[derive(Clone, Debug)]
 pub struct OverlayConfig {
@@ -21,8 +20,14 @@ impl Default for OverlayConfig {
     }
 }
 
+pub enum GuiCommand {
+    AboutToProcessFrames,
+    ProcessedFrame(ProcessedFrame),
+    Quit,
+}
+
 pub struct OverlayWindow {
-    window: gtk::Window,
+    window: gtk::ApplicationWindow,
     image_widget: gtk::Picture,
     _overlay_container: gtk::Overlay,
     _text_labels_box: gtk::Box,
@@ -32,37 +37,65 @@ pub struct OverlayWindow {
     pub labels: [Label; AOE4_STATS_POS.len()],
 }
 
-impl OverlayWindow {
-    pub fn new(config: OverlayConfig) -> Result<Self> {
-        // Initialize GTK
-        gtk::init()?;
+pub struct InteractWindow {
+    window: gtk::Window,
+    _quit_button: Button,
+}
 
-        let monitors: gdk::gio::ListModel = gdk::Display::default().unwrap().monitors();
-        let monitor = monitors
-            .item(0)
-            .unwrap()
-            .downcast::<gdk::Monitor>()
-            .unwrap();
-
-        // Create the main window with configured size
+impl InteractWindow {
+    pub fn new(sender: Sender<GuiCommand>, app: &Application) -> Result<Self> {
         let window = gtk::Window::builder()
-            .title("AOE4 Overlay")
-            //            .fullscreened(true)
-            .default_width(monitor.geometry().width())
-            .default_height(monitor.geometry().height())
+            .title("AOE4 Overlay Interaction")
             .maximized(false)
             .decorated(false)
             .resizable(false)
-            .focusable(false)
-            .focus_visible(false)
+            .focusable(true)
+            .focus_visible(true)
             .modal(false)
+            .css_classes(vec!["interactive-window"])
+            .application(app)
             .build();
 
-        // Set up CSS for transparency and styling
-        let css_provider = gtk::CssProvider::new();
-        let css_content = format!(
-            "window {{
+        // Create quit button
+        let quit_button = gtk::Button::with_label("Quit");
+        quit_button.set_halign(gtk::Align::Start);
+        quit_button.set_valign(gtk::Align::Start);
+        quit_button.set_child_visible(true);
+        quit_button.connect_clicked(move |_| {
+            log::info!("Quit button clicked, quitting...");
+            let _ = sender.try_send(GuiCommand::Quit);
+        });
+
+        // Add overlay container to window
+        window.set_child(Some(&quit_button));
+
+        Ok(Self {
+            window,
+            _quit_button: quit_button,
+        })
+    }
+
+    pub fn show(&self) {
+        self.window.present();
+    }
+
+    pub fn hide(&self) {
+        self.window.set_visible(false);
+    }
+}
+
+fn gtk_init_with_style() -> Result<IconTheme> {
+    // Initialize GTK
+    gtk::init()?;
+
+    // Set up CSS for transparency and styling
+    let css_provider = gtk::CssProvider::new();
+    let css_content = format!(
+        ".main-window {{
                 background-color: transparent;
+            }}
+            .interactive-window {{
+
             }}
             picture {{
                 border: 2px solid white;
@@ -86,14 +119,53 @@ impl OverlayWindow {
                 font-size: 50px;
                 border-radius: 3px;
             }}"
-        );
-        css_provider.load_from_string(&css_content);
+    );
+    css_provider.load_from_string(&css_content);
 
-        gtk::style_context_add_provider_for_display(
-            &gdk::Display::default().expect("Could not connect to display"),
-            &css_provider,
-            gtk::STYLE_PROVIDER_PRIORITY_APPLICATION,
-        );
+    gtk::style_context_add_provider_for_display(
+        &gdk::Display::default().expect("Could not connect to display"),
+        &css_provider,
+        gtk::STYLE_PROVIDER_PRIORITY_USER,
+    );
+
+    let display = gdk::Display::default().unwrap();
+    let icon_theme = IconTheme::builder()
+        .display(&display)
+        .theme_name("Aoe4Icons")
+        .search_path(vec!["src_images/icons"])
+        .build();
+    log::info!("icon_theme: {:?} {:?}", icon_theme, icon_theme.icon_names());
+
+    Ok(icon_theme)
+}
+
+impl OverlayWindow {
+    pub fn new(config: OverlayConfig, app: &Application) -> Result<Self> {
+        let monitors: gdk::gio::ListModel = gdk::Display::default().unwrap().monitors();
+        let monitor = monitors
+            .item(0)
+            .unwrap()
+            .downcast::<gdk::Monitor>()
+            .unwrap();
+
+        // Create the main window with configured size
+        let window = gtk::ApplicationWindow::builder()
+            .title("AOE4 Overlay")
+            .default_width(monitor.geometry().width())
+            .default_height(monitor.geometry().height())
+            .maximized(false)
+            .decorated(false)
+            .resizable(false)
+            .focusable(false)
+            .focus_visible(false)
+            .modal(false)
+            .application(app)
+            .css_classes(vec!["main-window"])
+            .icon_name("logo")
+            .build();
+
+        // Create overlay container
+        let overlay_container = gtk::Overlay::new();
 
         // Create image widget for displaying screen capture
         let image_widget = gtk::Picture::new();
@@ -101,9 +173,6 @@ impl OverlayWindow {
         image_widget.set_valign(gtk::Align::Start);
         image_widget.set_size_request(AREA_WIDTH, AREA_HEIGHT);
         image_widget.set_child_visible(config.show_debug_window);
-
-        // Create overlay container
-        let overlay_container = gtk::Overlay::new();
         overlay_container.set_child(Some(&image_widget));
 
         // Create vertical box for text labels (top-left)
@@ -155,37 +224,22 @@ impl OverlayWindow {
         })
     }
 
-    pub fn show(&self) {
-        self.window.present();
+    pub fn enable_waiting(&self, enable: bool) {
+        if enable {
+            self.centered_label.set_text("Waiting...");
+        } else {
+            self.centered_label.set_text("");
+        }
+    }
 
+    pub fn show(&self) {
+        self.window.set_visible(true);
         // Make window input-transparent (non-clickable)
         if let Some(surface) = self.window.surface() {
             surface.set_input_region(&cairo::Region::create());
         } else {
-            eprintln!("Warning: Could not get GDK surface for the window.");
+            log::error!("Warning: Could not get GDK surface for the window.");
         }
-
-        // Send ALT+Space after a short delay
-        // glib::timeout_add_local_once(std::time::Duration::from_millis(500), || {
-        //     if let Ok(mut enigo) = Enigo::new(&Settings::default()) {
-        //         // Send ALT+Space combination
-        //         let _ = enigo.key(Key::Alt, enigo::Direction::Press);
-        //         let _ = enigo.key(Key::Space, enigo::Direction::Press);
-        //         let _ = enigo.key(Key::Space, enigo::Direction::Release);
-        //         let _ = enigo.key(Key::Alt, enigo::Direction::Release);
-        //     }
-        // });
-
-        // glib::timeout_add_local_once(std::time::Duration::from_millis(2000), || {
-        //     if let Ok(mut enigo) = Enigo::new(&Settings::default()) {
-        //         let _ = enigo.key(Key::Tab, enigo::Direction::Click);
-        //     }
-        // });
-        // glib::timeout_add_local_once(std::time::Duration::from_millis(2050), || {
-        //     if let Ok(mut enigo) = Enigo::new(&Settings::default()) {
-        //         let _ = enigo.key(Key::Unicode('q'), enigo::Direction::Click);
-        //     }
-        // });
     }
 
     pub fn update_image_from_processed_frame(&self, frame: ProcessedFrame) {
@@ -261,28 +315,33 @@ impl OverlayWindow {
     }
 }
 
-pub fn create_quit_signal() -> Arc<AtomicBool> {
-    let should_quit: Arc<AtomicBool> = Arc::new(AtomicBool::new(false));
-    should_quit
-}
-
-pub async fn run_async_with_image_receiver(
-    should_quit: Arc<AtomicBool>,
-    gtk_receiver: Receiver<ProcessedFrame>,
+pub async fn run(
+    gtk_sender: Sender<GuiCommand>,
+    mut gtk_receiver: Receiver<GuiCommand>,
     config: OverlayConfig,
+    enable_waiting: bool,
 ) -> Result<()> {
-    let should_quit_for_gtk = should_quit.clone();
-
     // Start the GTK thread
     let gtk_handle = std::thread::spawn(move || -> Result<()> {
-        let window = OverlayWindow::new(config)?;
-
-        // Initialize system tray icon with quit handler
-        let _tray = SystemTray::new(should_quit_for_gtk.clone())?;
-
-        // Create main loop
+        let _icon_theme = gtk_init_with_style()?;
         let main_context = glib::MainContext::default();
         let main_loop = glib::MainLoop::new(Some(&main_context), false);
+
+        let app = Application::builder()
+            .application_id("org.aoe4_overlay")
+            .version("0.1")
+            .build();
+
+        let window = OverlayWindow::new(config, &app)?;
+        let interactive_window = InteractWindow::new(gtk_sender.clone(), &app)?;
+
+        if enable_waiting {
+            interactive_window.show();
+        }
+        window.enable_waiting(enable_waiting);
+
+        // Initialize system tray icon with quit handler
+        let _tray = SystemTray::new(gtk_sender.clone())?;
 
         // Set up a timeout to check for quit signal and process images
         let main_loop_quit = main_loop.clone();
@@ -291,23 +350,23 @@ pub async fn run_async_with_image_receiver(
         let window_rc = std::rc::Rc::new(window);
         let window_for_image_updates = std::rc::Rc::clone(&window_rc);
 
-        glib::idle_add_local(move || {
-            // Process any pending processed frames
-            while let Ok(processed_frame) = gtk_receiver.try_recv() {
-                window_for_image_updates.update_image_from_processed_frame(processed_frame);
+        main_context.spawn_local(async move {
+            while let Some(gui_command) = gtk_receiver.recv().await {
+                match gui_command {
+                    GuiCommand::ProcessedFrame(processed_frame) => {
+                        window_for_image_updates.update_image_from_processed_frame(processed_frame);
+                    }
+                    GuiCommand::Quit => {
+                        log::info!("Quit command received from channel, quitting...");
+                        main_loop_quit.quit();
+                        break;
+                    }
+                    GuiCommand::AboutToProcessFrames => {
+                        interactive_window.hide();
+                        window_for_image_updates.enable_waiting(false);
+                    }
+                }
             }
-            glib::ControlFlow::Continue
-        });
-
-        glib::timeout_add_local(std::time::Duration::from_millis(100), move || {
-            // Check for quit signal
-            if should_quit_for_gtk.load(Ordering::Relaxed) {
-                log::info!("Quit signal received, quitting window");
-                main_loop_quit.quit();
-                return glib::ControlFlow::Break;
-            }
-
-            glib::ControlFlow::Continue
         });
 
         // React to window close request

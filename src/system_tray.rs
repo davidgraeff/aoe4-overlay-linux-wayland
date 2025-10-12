@@ -6,7 +6,7 @@ use libappindicator_zbus::{
 use zbus::fdo::Result;
 
 // Binary include "logo.png" as a byte array
-const LOGO: &[u8] = include_bytes!("logo.png");
+const LOGO: &[u8] = include_bytes!("../src_images/icons/logo.png");
 
 pub(crate) struct Base {
     pixmap: IconPixmap,

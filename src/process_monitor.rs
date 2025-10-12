@@ -1,26 +1,38 @@
-use log::{debug, info};
-use std::{sync::Arc, time::Duration};
+use log::{debug};
+use std::{time::Duration};
+use tokio::time::timeout;
 
 /// Monitor for checking if a specific process is running
 pub struct ProcessMonitor {
     pub(crate) process_name: String,
     pub(crate) check_interval: Duration,
     pub(crate) armed: bool,
+    pub receiver: tokio::sync::oneshot::Receiver<()>,
 }
 
 pub enum WaitForProcessResult {
     ProcessFound,
     ProcessNotFound,
-    QuitSignalReceived,
+    Terminated
+}
+
+#[derive(PartialEq)]
+pub enum WaitForProcessTask {
+    WaitForProcess,
+    WaitForProcessEnd,
 }
 
 impl ProcessMonitor {
-    pub fn new(process_name: String, check_interval_ms: u64) -> Self {
-        Self {
+    pub fn new(process_name: String, check_interval_ms: u64) -> (Self, tokio::sync::oneshot::Sender<()>) {
+        // Create tokio once channel for quiting the process monitor task
+        let (sender,receiver) = tokio::sync::oneshot::channel::<()>();
+
+        (Self {
             armed: !process_name.is_empty(),
             process_name,
             check_interval: Duration::from_millis(check_interval_ms),
-        }
+            receiver
+        }, sender)
     }
 
     /// Check if the target process is currently running
@@ -50,58 +62,33 @@ impl ProcessMonitor {
         }
     }
 
-    /// Wait until the target process is running
-    pub async fn wait_for_process(
-        &self,
-        should_quit: Arc<std::sync::atomic::AtomicBool>,
+    pub async fn act_on_process(
+        &mut self,
+        task: WaitForProcessTask
     ) -> WaitForProcessResult {
         if !self.armed {
-            return WaitForProcessResult::ProcessNotFound;
+            return if task == WaitForProcessTask::WaitForProcess {
+                WaitForProcessResult::ProcessFound
+            } else {
+                WaitForProcessResult::ProcessNotFound
+            }
         }
-
-        info!(
-            "Waiting for process '{}' to start (checking every {:?})...",
-            self.process_name, self.check_interval
-        );
 
         loop {
-            if self.is_process_running() {
-                info!(
-                    "Process '{}' detected, starting capture...",
-                    self.process_name
-                );
-                return WaitForProcessResult::ProcessFound;
+            if task == WaitForProcessTask::WaitForProcess {
+                if self.is_process_running() {
+                    return WaitForProcessResult::ProcessFound;
+                }
+            } else {
+                if !self.is_process_running() {
+                    return WaitForProcessResult::ProcessNotFound;
+                }
             }
-            tokio::time::sleep(self.check_interval).await;
-
-            if should_quit.load(std::sync::atomic::Ordering::Relaxed) {
-                return WaitForProcessResult::QuitSignalReceived;
-            }
-        }
-    }
-
-    /// Continuously monitor if the process is still running
-    pub async fn monitor_process_running(
-        &self,
-        should_quit: Arc<std::sync::atomic::AtomicBool>,
-    ) -> WaitForProcessResult {
-        if !self.armed {
-            tokio::time::sleep(Duration::from_secs(30 * 3600 * 24)).await;
-            return WaitForProcessResult::ProcessFound;
-        }
-        loop {
-            if !self.is_process_running() {
-                info!(
-                    "Process '{}' is no longer running, stopping capture...",
-                    self.process_name
-                );
-                return WaitForProcessResult::ProcessNotFound;
-            }
-            tokio::time::sleep(self.check_interval).await;
-
-            if should_quit.load(std::sync::atomic::Ordering::Relaxed) {
-                return WaitForProcessResult::QuitSignalReceived;
+            if let Ok(_) = timeout(self.check_interval, &mut self.receiver).await {
+                self.armed = false;
+                break;
             }
         }
+        WaitForProcessResult::Terminated
     }
 }

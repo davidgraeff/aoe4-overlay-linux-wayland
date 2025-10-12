@@ -7,6 +7,8 @@ resolver = "3"
 [dependencies]
 serde = { version = "1.0", features = ["derive"] }
 tokio = { version = ">=1.40", features = ["rt", "rt-multi-thread", "macros", "signal"] }
+fixedstr = "0"
+include_directory = "0.1"
 
 # CLI
 clap = { version = "4.5", features = ["derive"] }
@@ -19,14 +21,16 @@ env_logger = "0.11"
 anyhow = "1.0"
 
 # Process monitoring
-procfs = "0.17"
+procfs = "0.18"
 
 # GUI
-gdk = { git = "https://github.com/gtk-rs/gtk4-rs.git", version = ">=0.10", package = "gdk4", features = ["v4_16"] }
-gtk = { git = "https://github.com/gtk-rs/gtk4-rs.git", version = ">=0.10", package = "gtk4", features = ["gnome_48"] }
+gdk = { version = "0.10", package = "gdk4", features = ["v4_16"] } # git = "https://github.com/gtk-rs/gtk4-rs.git",
+gtk = { version = "0.10", package = "gtk4", features = ["gnome_48"] } # git = "https://github.com/gtk-rs/gtk4-rs.git",
 
 glib = "0.21"
 gio = "0.21"
+
+libadwaita = { version = "0.8", features = ["v1_7"] }
 
 libappindicator-zbus = "0.1"
 
@@ -39,9 +43,9 @@ zbus = { version = "5.11", default-features = false, features = ["tokio"] }
 enigo = { version = "0.6", default-features = true, features = ["wayland", "libei_tokio"] }
 pipewire = { version = "0.8", features = ["v0_3_77"] }
 
+# OCR
 # ort = { version = "2.0.0-rc.10", features = ["rocm", "download-binaries", "fetch-models"] }
 oar-ocr = { version = "0.2", path = "3rdparty/oar-ocr", features = ["rocm"] }
-
 rust-paddle-ocr = { git = "https://github.com/zibo-chen/rust-paddle-ocr.git", branch = "main" }
 rayon = "1.11"
 tesseract = "0.15"

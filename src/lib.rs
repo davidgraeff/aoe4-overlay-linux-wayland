@@ -1,3 +1,6 @@
+#![feature(str_as_str)]
+#![feature(stmt_expr_attributes)]
+
 pub mod consts {
     use image::math::Rect;
 
@@ -42,4 +45,5 @@ pub mod consts {
     pub const INDEX_POP: usize = 0;
 }
 
+pub mod ocr;
 pub mod image_analyzer;

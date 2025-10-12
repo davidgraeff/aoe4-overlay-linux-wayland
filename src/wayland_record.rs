@@ -1,12 +1,10 @@
-use crate::{pipewire_stream::PipeWireStream};
-use anyhow::Result;
+use crate::pipewire_stream::{PipeWireStream, PipewireMessage};
+use anyhow::{Result, anyhow};
+use log::info;
 use std::{
     collections::HashMap,
-    future::AsyncDrop,
-    pin::Pin,
     sync::{Arc, Mutex, mpsc::SyncSender},
     thread,
-    thread::JoinHandle,
 };
 use zbus::{
     Connection, MessageStream,
@@ -28,13 +26,9 @@ pub enum CursorModeTypes {
     Show,
 }
 
-use crate::dbus_portal_screen_cast::ScreenCastProxy;
-use crate::pixelbuf_wrapper::PixelBufWrapperWithDroppedFramesTS;
-
-enum PipewireMessage {
-    Stop,
-    Connect(u32),
-}
+use crate::{
+    dbus_portal_screen_cast::ScreenCastProxy, pixelbuf_wrapper::PixelBufWrapperWithDroppedFramesTS,
+};
 
 pub struct WaylandRecorder {
     connection: Connection,
@@ -43,8 +37,42 @@ pub struct WaylandRecorder {
     restore_token: Option<String>,
     id: OwnedValue,
     stream_node_id: Arc<Mutex<Option<u32>>>,
-    pw_thread: Option<JoinHandle<()>>,
-    pw_sender: pipewire::channel::Sender<PipewireMessage>,
+}
+
+pub struct WaylandStopHandler {
+    pub connection: Connection,
+    pub session_path: String,
+}
+
+
+pub async fn close_session(session_path: &str, connection: &Connection) {
+    if session_path.len() == 0 {
+        return;
+    }
+    log::info!(
+        "Closing session...: {:?}",
+        session_path.replace("request", "session")
+    );
+    if let Err(err) = connection
+        .clone()
+        .call_method(
+            Some("org.freedesktop.portal.Desktop"),
+            session_path.replace("request", "session"),
+            Some("org.freedesktop.portal.Session"),
+            "Close",
+            &(),
+        )
+        .await
+    {
+        log::error!("Failed to close session: {}", err);
+    }
+}
+
+impl WaylandStopHandler {
+    pub async fn stop(&self) {
+        close_session(&self.session_path, &self.connection).await;
+        let _ = self.connection.clone().close().await;
+    }
 }
 
 impl WaylandRecorder {
@@ -56,57 +84,35 @@ impl WaylandRecorder {
             .await
             .expect("failed to create dbus proxy for screen-cast");
 
-        let (pw_sender, _pw_receiver) = pipewire::channel::channel::<PipewireMessage>();
-
         Ok(WaylandRecorder {
             connection,
             screen_cast_proxy,
             session_path: String::new(),
             id: Value::from(id).try_to_owned().unwrap(),
             stream_node_id: Arc::new(Mutex::new(None)),
-            pw_thread: None,
-            pw_sender,
             restore_token: None,
         })
     }
 
-    pub async fn start(
+    pub fn get_stop_handler(&self) -> WaylandStopHandler {
+        WaylandStopHandler {
+            connection: self.connection.clone(),
+            session_path: self.session_path.clone(),
+        }
+    }
+
+    pub async fn run(
         &mut self,
         record_type: RecordTypes,
         cursor_mode_type: CursorModeTypes,
-        sender: SyncSender<bool>,
-        image_sender_content: PixelBufWrapperWithDroppedFramesTS
-    ) -> bool {
-        let (pw_sender, pw_receiver) = pipewire::channel::channel::<PipewireMessage>();
-        self.pw_sender = pw_sender;
+        pw_sender: pipewire::channel::Sender<PipewireMessage>,
+    ) -> Result<()> {
+        info!("Starting...");
 
-        if let Ok(restore_token) = std::fs::read_to_string("restore_token.txt")  {
+        if let Ok(restore_token) = std::fs::read_to_string("restore_token.txt") {
             self.restore_token = Some(restore_token);
-            log::info!("Loaded restore token from file");
+            info!("Loaded restore token from file");
         }
-
-        let pw_thread = thread::spawn(move || {
-            let pipewire_stream = PipeWireStream::new(sender, image_sender_content).unwrap();
-            let mainloop = pipewire_stream.main_loop.clone();
-            let mainloop_clone = pipewire_stream.main_loop.clone();
-            let pipewire_stream_arc = Arc::new(Mutex::new(pipewire_stream));
-            let _receiver = pw_receiver.attach(mainloop.loop_(), {
-                move |m| match m {
-                    PipewireMessage::Stop => {
-                        log::info!("PipeWire main loop: Received stop message, quitting...");
-                        mainloop_clone.quit()
-                    }
-                    PipewireMessage::Connect(stream_node_id) => {
-                        let mut pipewire_stream = pipewire_stream_arc.lock().unwrap();
-                        pipewire_stream.connect_to_node(stream_node_id).unwrap();
-                    }
-                }
-            });
-            log::info!("Starting PipeWire main loop");
-            mainloop.run();
-            log::info!("Finished PipeWire main loop");
-        });
-        self.pw_thread = Some(pw_thread);
 
         let id_value = Value::from(self.id.clone());
         let option_map: HashMap<&str, &Value> = [
@@ -123,101 +129,96 @@ impl WaylandRecorder {
 
         while let Some(Ok(msg)) = message_stream.next().await {
             match msg.message_type() {
+                message::Type::Error => {
+                    let body = msg.body();
+                    let s = body.deserialize::<String>()?;
+                    log::error!(
+                        "Error message received: {:?}. Session handle: {}",
+                        s,
+                        self.session_path
+                    );
+                }
                 message::Type::Signal => {
                     let body = msg.body();
-                    let (response_num, response) = body
-                        .deserialize::<(u32, HashMap<&str, Value>)>()
-                        .expect("failed to handle session");
+                    let (_response_num, response) =
+                        body.deserialize::<(u32, HashMap<&str, Value>)>()?;
 
-                    if response_num > 0 {
-                        return false;
-                    }
+                    // if response_num > 0 {
+                    //     return Ok(false);
+                    // }
 
                     if response.len() == 0 {
                         continue;
                     }
 
                     if response.contains_key("session_handle") {
-                        self.handle_session(
-                            self.screen_cast_proxy.clone(),
-                            response.clone(),
-                            record_type,
-                            cursor_mode_type,
-                        )
-                        .await
-                        .expect("failed to handle session");
+                        let session_path = response
+                            .get("session_handle")
+                            .ok_or(anyhow!("No session_handle in response"))?
+                            .clone()
+                            .downcast::<String>()?;
+                        self.session_path = session_path.clone();
+
+                        self.handle_session(record_type, cursor_mode_type)
+                            .await
+                            .map_err(|e| {
+                                anyhow!("{}. Session handle: {}", e, &self.session_path)
+                            })?;
                         continue;
                     }
 
                     if response.contains_key("streams") {
                         if let Some(restore_token) = response.get("restore_token") {
-                            let restore_token = restore_token
-                                .downcast_ref::<&str>()
-                                .expect("cannot down cast restore_token to &str");
+                            let restore_token = restore_token.downcast_ref::<&str>()?;
                             self.restore_token = Some(restore_token.to_string());
                             log::info!("Got restore token: {}", restore_token);
-                            std::fs::write("restore_token.txt", restore_token).expect("unable to write restore token file");
+                            std::fs::write("restore_token.txt", restore_token)?;
                         }
-                        self.record_screen_cast(response.clone())
-                            .await
-                            .expect("failed to record screen cast");
+                        let node_id = self.parse_stream_response(response.clone()).await?;
+                        let _ = pw_sender.send(PipewireMessage::Connect(node_id));
                         break;
                     }
                 }
                 _ => {
-                    log::warn!("Unkown message: {:?}", msg);
+                    log::warn!("Unknown message: {:?}", msg);
                 }
             }
         }
 
-        true
+        log::info!("No more messages. Session path: {}", self.session_path);
+        Ok(())
     }
 
-    pub async fn stop(&mut self) {
-        log::info!("Stopping Wayland Recorder");
-        let _ = self.pw_sender.send(PipewireMessage::Stop);
-
-        if let Some(pw_thread) = self.pw_thread.take() {
-            let _ = pw_thread.join();
+    pub async fn close_session(&mut self) {
+        if self.session_path.len() == 0 {
+            return;
         }
-
-        if self.session_path.len() > 0 {
-            println!(
-                "Closing session...: {:?}",
-                self.session_path.replace("request", "session")
-            );
-            if let Err(err) = self.connection
-                .clone()
-                .call_method(
-                    Some("org.freedesktop.portal.Desktop"),
-                    self.session_path.clone().replace("request", "session"),
-                    Some("org.freedesktop.portal.Session"),
-                    "Close",
-                    &(),
-                )
-                .await {
-                log::error!("Failed to close session: {}", err);
-            }
-            self.session_path = String::new();
+        log::info!(
+            "Closing session...: {:?}",
+            self.session_path.replace("request", "session")
+        );
+        if let Err(err) = self
+            .connection
+            .clone()
+            .call_method(
+                Some("org.freedesktop.portal.Desktop"),
+                self.session_path.clone().replace("request", "session"),
+                Some("org.freedesktop.portal.Session"),
+                "Close",
+                &(),
+            )
+            .await
+        {
+            log::error!("Failed to close session: {}", err);
         }
+        self.session_path = String::new();
     }
 
     async fn handle_session(
         &mut self,
-        screen_cast_proxy: ScreenCastProxy<'_>,
-        response: HashMap<&str, Value<'_>>,
         record_type: RecordTypes,
         cursor_mode_type: CursorModeTypes,
     ) -> Result<()> {
-        let response_session_handle = response
-            .get("session_handle")
-            .expect("cannot get session_handle")
-            .clone()
-            .downcast::<String>()
-            .expect("cannot down cast session_handle");
-
-        self.session_path = response_session_handle.clone();
-
         let types_value: Value = match record_type {
             RecordTypes::Monitor => Value::from(1u32),
             RecordTypes::Window => Value::from(2u32),
@@ -227,7 +228,7 @@ impl WaylandRecorder {
             CursorModeTypes::Show => Value::from(2u32),
         };
         let multiple_value: Value = Value::from(false);
-        let persist_mode_value: Value = Value::from(2u32);
+        let persist_mode_value: Value = Value::from(0u32); // Value::from(2u32);
         let id_value = Value::from(self.id.clone());
         let mut option_map: HashMap<&str, &Value> = HashMap::from([
             ("handle_token", &id_value),
@@ -237,27 +238,28 @@ impl WaylandRecorder {
             ("persist_mode", &persist_mode_value),
         ]);
 
-        let (restore_token, has_restore_token) =if let Some(restore_token) = &self.restore_token {
-            (Value::from(restore_token.clone()), true)
-        } else {
-            (Value::from(""), false)
-        };
+        // let (restore_token, has_restore_token) = if let Some(restore_token) = &self.restore_token
+        // {     (Value::from(restore_token.clone()), true)
+        // } else {
+        //     (Value::from(""), false)
+        // };
+        //
+        // if has_restore_token {
+        //     option_map.insert("restore_token", &restore_token);
+        // }
 
-        if has_restore_token {
-            option_map.insert("restore_token", &restore_token);
-        }
-
-        screen_cast_proxy
+        self.screen_cast_proxy
             .select_sources(
-                &ObjectPath::try_from(response_session_handle.clone())?,
+                &ObjectPath::try_from(self.session_path.clone())?,
                 option_map,
             )
             .await?;
 
         let id_value = Value::from(self.id.clone());
-        let _response = screen_cast_proxy
+        let _response = self
+            .screen_cast_proxy
             .start(
-                &ObjectPath::try_from(response_session_handle.clone())?,
+                &ObjectPath::try_from(self.session_path.clone())?,
                 "parent_window",
                 HashMap::from([("handle_token", &id_value)]),
             )
@@ -265,7 +267,7 @@ impl WaylandRecorder {
         Ok(())
     }
 
-    async fn record_screen_cast(&mut self, response: HashMap<&str, Value<'_>>) -> Result<()> {
+    async fn parse_stream_response(&mut self, response: HashMap<&str, Value<'_>>) -> Result<u32> {
         let streams: &Value<'_> = response.get("streams").expect("cannot get streams");
 
         // get fields from nested structure inside elements
@@ -352,28 +354,12 @@ impl WaylandRecorder {
             .expect("cannot lock stream_node_id");
         *stream_node_id_lock = Some(stream_node_id);
 
-        let _ = self
-            .pw_sender
-            .send(PipewireMessage::Connect(stream_node_id));
-
-        Ok(())
-    }
-}
-
-impl AsyncDrop for WaylandRecorder {
-    async fn drop(mut self: Pin<&mut Self>) {
-        log::info!("Dropping Wayland Recorder");
-        self.stop().await;
+        Ok(stream_node_id)
     }
 }
 
 impl Drop for WaylandRecorder {
     fn drop(&mut self) {
-        log::info!("Dropping Wayland Recorder");
-        let _ = self.pw_sender.send(PipewireMessage::Stop);
-
-        if let Some(pw_thread) = self.pw_thread.take() {
-            let _ = pw_thread.join();
-        }
+        let _ = self.connection.clone().close();
     }
 }

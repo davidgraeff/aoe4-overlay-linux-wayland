@@ -1,18 +1,15 @@
 use anyhow::Result;
 use gtk::gio;
 use log::info;
-use std::sync::{
-    Arc,
-    atomic::{AtomicBool, Ordering},
-};
 use gtk::prelude::{ActionMapExt, ApplicationExt};
+use crate::overlay_window_gtk::GuiCommand;
 
 pub struct SystemTray {
     _app: gtk::Application,
 }
 
 impl SystemTray {
-    pub fn new(should_quit: Arc<AtomicBool>) -> Result<Self> {
+    pub fn new(gtk_sender: tokio::sync::mpsc::Sender<GuiCommand>) -> Result<Self> {
         // Create an application for the system tray
         let app = gtk::Application::builder()
             .application_id("com.aoe4.overlay.tray")
@@ -21,10 +18,9 @@ impl SystemTray {
 
         // Create a simple action for quit
         let quit_action = gio::SimpleAction::new("quit", None);
-        let should_quit_clone = Arc::clone(&should_quit);
         quit_action.connect_activate(move |_, _| {
             info!("Quit action triggered from menu");
-            should_quit_clone.store(true, Ordering::Relaxed);
+            let _ = gtk_sender.try_send(GuiCommand::Quit);
         });
 
         app.add_action(&quit_action);

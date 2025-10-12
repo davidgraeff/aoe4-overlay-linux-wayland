@@ -6,6 +6,7 @@ use anyhow::{Result, anyhow};
 use aoe4_overlay::consts::{AREA_HEIGHT, AREA_WIDTH};
 use log::{debug, error, info};
 use opencv::core::{Mat, MatTraitConst, Rect};
+use crate::overlay_window_gtk::GuiCommand;
 
 /// Frame data with original image and analysis results
 #[derive(Clone)]
@@ -23,16 +24,16 @@ unsafe impl Send for FrameProcessor {}
 
 impl FrameProcessor {
     pub fn new() -> Result<Self> {
-        let analyzer = ImageAnalyzer::new()?;
+        let analyzer = ImageAnalyzer::new(OCRModel::TemplateMatching)?;
         Ok(Self { analyzer })
     }
 
     /// Start processing frames from input channel and send results to output channel
-    pub fn start_processing(
+    pub fn run(
         self,
         frame_rx: std::sync::mpsc::Receiver<bool>,
         frame_rx_content: PixelBufWrapperWithDroppedFramesTS,
-        processed_tx: std::sync::mpsc::SyncSender<ProcessedFrame>,
+        processed_tx: tokio::sync::mpsc::Sender<GuiCommand>,
     ) -> Result<()> {
         info!("Frame processor started");
         let mut analyzer = self.analyzer.into_inner().ok_or_else(|| anyhow!(""))?;
@@ -81,7 +82,7 @@ impl FrameProcessor {
             let roi = Rect::new(0, frame.height - AREA_HEIGHT, AREA_WIDTH, AREA_HEIGHT);
             let cv_mat = Mat::roi(&cv_mat, roi).unwrap().try_clone()?;
 
-            match analyzer.analyze(cv_mat, OCRModel::ONNX) {
+            match analyzer.analyze(cv_mat) {
                 Ok(analysis) => {
                     processed_count += 1;
 
@@ -102,7 +103,7 @@ impl FrameProcessor {
                         );
                     }
                     // Try to send, drop if channel is full
-                    if let Err(_) = processed_tx.try_send(processed_frame) {
+                    if let Err(_) = processed_tx.try_send(GuiCommand::ProcessedFrame(processed_frame)) {
                         dropped_count += 1;
                         debug!(
                             "Dropped processed frame (channel full). Total dropped: {}",
