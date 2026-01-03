@@ -1,38 +1,24 @@
 use log::{debug};
 use std::{time::Duration};
+use tokio::sync::mpsc::Sender;
+// use tokio::sync::oneshot::Receiver;
 use tokio::time::timeout;
+use crate::events::ControlEvent;
 
 /// Monitor for checking if a specific process is running
 pub struct ProcessMonitor {
     pub(crate) process_name: String,
     pub(crate) check_interval: Duration,
-    pub(crate) armed: bool,
-    pub receiver: tokio::sync::oneshot::Receiver<()>,
-}
-
-pub enum WaitForProcessResult {
-    ProcessFound,
-    ProcessNotFound,
-    Terminated
-}
-
-#[derive(PartialEq)]
-pub enum WaitForProcessTask {
-    WaitForProcess,
-    WaitForProcessEnd,
+    pub armed: bool
 }
 
 impl ProcessMonitor {
-    pub fn new(process_name: String, check_interval_ms: u64) -> (Self, tokio::sync::oneshot::Sender<()>) {
-        // Create tokio once channel for quiting the process monitor task
-        let (sender,receiver) = tokio::sync::oneshot::channel::<()>();
-
-        (Self {
+    pub fn new(process_name: String, check_interval_ms: u64) -> Self {
+        Self {
             armed: !process_name.is_empty(),
             process_name,
             check_interval: Duration::from_millis(check_interval_ms),
-            receiver
-        }, sender)
+        }
     }
 
     /// Check if the target process is currently running
@@ -40,55 +26,66 @@ impl ProcessMonitor {
         if !self.armed {
             return false;
         }
-        match procfs::process::all_processes() {
-            Ok(processes) => {
-                for process_result in processes {
-                    if let Ok(process) = process_result {
-                        if let Ok(stat) = process.stat() {
-                            // Check both comm (command name) and cmdline (full command line)
-                            if stat.comm.contains(&self.process_name) {
-                                //debug!("Found process: {} (pid: {})", stat.comm, process.pid);
-                                return true;
-                            }
+        is_process_running(&self.process_name)
+    }
+
+    pub fn notify_control_channel(&self) -> (tokio::sync::oneshot::Sender<()>, tokio::sync::oneshot::Receiver<()>) {
+        tokio::sync::oneshot::channel::<()>()
+    }
+
+    pub async fn notify_on_change(
+        &mut self,
+        mut stopper: tokio::sync::oneshot::Receiver<()>,
+        control_sender: Sender<ControlEvent>
+    )  {
+        if !self.armed {
+            return;
+        }
+
+        let process_running = self.is_process_running();
+        let process_name = self.process_name.clone();
+        let check_interval = self.check_interval;
+
+        control_sender.send(ControlEvent::ProcessStatusChanged(process_running)).await.ok();
+
+        tokio::spawn(async move {
+            loop {
+                let currently_running = is_process_running(&process_name);
+                if currently_running != process_running {
+                    log::info!("Process {} running status changed: {}", &process_name, process_running);
+                    control_sender.send(ControlEvent::ProcessStatusChanged(process_running)).await.ok();
+                    break;
+                }
+                if let Ok(v) = timeout(check_interval, &mut stopper).await {
+                    log::info!("Process monitor: Stopping monitoring for process {}. {:?}", &process_name, v);
+                    break;
+                }
+            }
+        });
+    }
+}
+
+
+/// Check if the target process is currently running
+pub fn is_process_running(process_name: &str) -> bool {
+    match procfs::process::all_processes() {
+        Ok(processes) => {
+            for process_result in processes {
+                if let Ok(process) = process_result {
+                    if let Ok(stat) = process.stat() {
+                        // Check both comm (command name) and cmdline (full command line)
+                        if stat.comm.contains(&process_name) {
+                            //debug!("Found process: {} (pid: {})", stat.comm, process.pid);
+                            return true;
                         }
                     }
                 }
-                false
             }
-            Err(e) => {
-                debug!("Error reading processes: {}", e);
-                false
-            }
+            false
         }
-    }
-
-    pub async fn act_on_process(
-        &mut self,
-        task: WaitForProcessTask
-    ) -> WaitForProcessResult {
-        if !self.armed {
-            return if task == WaitForProcessTask::WaitForProcess {
-                WaitForProcessResult::ProcessFound
-            } else {
-                WaitForProcessResult::ProcessNotFound
-            }
+        Err(e) => {
+            debug!("Error reading processes: {}", e);
+            false
         }
-
-        loop {
-            if task == WaitForProcessTask::WaitForProcess {
-                if self.is_process_running() {
-                    return WaitForProcessResult::ProcessFound;
-                }
-            } else {
-                if !self.is_process_running() {
-                    return WaitForProcessResult::ProcessNotFound;
-                }
-            }
-            if let Ok(_) = timeout(self.check_interval, &mut self.receiver).await {
-                self.armed = false;
-                break;
-            }
-        }
-        WaitForProcessResult::Terminated
     }
 }

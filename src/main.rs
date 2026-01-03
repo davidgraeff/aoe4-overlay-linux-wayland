@@ -3,36 +3,28 @@
 #![feature(str_as_str)]
 #![feature(stmt_expr_attributes)]
 
-use crate::{
-    overlay_window_gtk::{OverlayConfig},
-    process_monitor::WaitForProcessResult,
-    system_tray::{Base, Menu},
+use anyhow::Result;
+use aoe4_overlay::{
+    events::{ControlEvent, create_control_event_channel},
+    frame_processor, pipewire_stream,
+    pipewire_stream::PipeWireStopHandler,
+    pixelbuf_wrapper::PixelBufWrapperWithDroppedFramesTS,
+    process_monitor,
+    process_monitor::ProcessMonitor,
+    ui,
+    ui::{GuiCommand, OverlayConfig},
+    utils, wayland_record,
+    wayland_record::SourceType,
 };
-use anyhow::{anyhow, Result};
+use ashpd::enumflags2::BitFlags;
 use clap::Parser;
-use libappindicator_zbus::{tray, utils::Category};
+use gio::prelude::ApplicationExtManual;
 use log::{error, info};
 use std::sync::mpsc as std_mpsc;
-use tokio::{signal, task};
-
-mod dbus_portal_screen_cast;
-mod frame_processor;
-mod image_analyzer;
-pub mod ocr;
-mod overlay_window_gtk;
-mod pipewire_stream;
-mod pixelbuf_wrapper;
-mod process_monitor;
-mod system_menu;
-mod system_tray;
-mod utils;
-mod wayland_record;
-
-use crate::{
-    overlay_window_gtk::GuiCommand,
-    pixelbuf_wrapper::PixelBufWrapperWithDroppedFramesTS,
+use tokio::{
+    signal,
+    sync::mpsc::{Receiver, Sender},
 };
-pub use aoe4_overlay::consts;
 
 /// AOE4 Overlay - Screen capture and overlay for Age of Empires IV
 #[derive(Parser, Debug)]
@@ -44,7 +36,7 @@ struct Args {
     capture_mode: String,
 
     /// No debug window, only show overlay
-    #[arg(short = 'd', long, default_value_t = false)]
+    #[arg(short = 'd', long, default_value_t = true)]
     debug_window: bool,
 
     /// Process name to monitor (if set, capture only starts when this process is running)
@@ -56,8 +48,7 @@ struct Args {
     check_interval: u64,
 }
 
-#[tokio::main]
-async fn main() -> Result<()> {
+fn main() -> Result<()> {
     env_logger::builder()
         .filter(None, log::LevelFilter::Info)
         .filter(Some("aoe4_overlay"), log::LevelFilter::Debug)
@@ -70,10 +61,10 @@ async fn main() -> Result<()> {
     }
 
     // Determine record type based on capture mode
-    let record_type = match args.capture_mode.as_str() {
-        "window" => wayland_record::RecordTypes::Window,
-        "monitor" => wayland_record::RecordTypes::Monitor,
-        _ => wayland_record::RecordTypes::Monitor,
+    let record_type: BitFlags<SourceType> = match args.capture_mode.as_str() {
+        "window" => BitFlags::from(SourceType::Window),
+        "monitor" => BitFlags::from(SourceType::Monitor),
+        _ => SourceType::Monitor | SourceType::Window,
     };
 
     // Create overlay configuration
@@ -87,33 +78,17 @@ async fn main() -> Result<()> {
     );
     info!("Capture mode: {}", args.capture_mode);
 
-
-    let _connection = tray(
-        Base::boot,
-        "com.aoe4.overlay.tray",
-        "Age of Empires IV Overlay",
-        Menu::boot,
-        Menu::menu,
-        1,
-    )
-        .with_icon_pixmap(Base::icon_pixmap)
-        .with_item_is_menu(false)
-        .with_category(Category::ApplicationStatus)
-        .with_menu_status(Menu::status)
-        .with_on_clicked(Menu::on_clicked)
-        .run()
-        .await?;
-
-
     // Start frame processor
     info!("Initializing frame processor...");
     let frame_processor = match frame_processor::FrameProcessor::new() {
         Ok(processor) => processor,
         Err(e) => {
-            error!("Failed to initialize frame processor: {}", e);
             anyhow::bail!("Frame processor initialization failed: {}", e);
         }
     };
+
+    let process_monitor =
+        ProcessMonitor::new(args.process_name.unwrap_or_default(), args.check_interval);
 
     // Create std_mpsc channel for GTK (since GTK needs to run in its own thread)
     let (gtk_sender, gtk_receiver) = tokio::sync::mpsc::channel::<GuiCommand>(2);
@@ -123,50 +98,103 @@ async fn main() -> Result<()> {
     let pixelbuf_content_clone = pixelbuf_content.clone();
 
     let gtk_sender_clone = gtk_sender.clone();
+    let wait_for_process = process_monitor.armed;
 
     // Run image processing in a separate thread. Quit by sending an empty frame.
-    let gtk_sender = gtk_sender_clone.clone();
-    let processor_join_handle = tokio::spawn(async move {
-        let gtk_sender_clone = gtk_sender.clone();
-        let _ = task::spawn_blocking(move || {
-            let handler = std::thread::spawn(move || {
-                let _ = frame_processor.run(pipewire_receiver, pixelbuf_content, gtk_sender_clone);
-            });
-            let _ = handler.join().map_err(|_| anyhow!("Failed to join frame_processor thread"));
-        })
-            .await;
+    let frame_processor_handler = std::thread::spawn(move || {
+        let gtk_sender = gtk_sender_clone.clone();
+        let _ = frame_processor.run(pipewire_receiver, pixelbuf_content, gtk_sender_clone);
+        info!("Frame processor thread exiting");
         let _ = gtk_sender.try_send(GuiCommand::Quit);
     });
-
-    let (mut process_monitor, process_monitor_quitter) = process_monitor::ProcessMonitor::new(
-        args.process_name.unwrap_or_default(),
-        args.check_interval,
-    );
-
-    // Start the Wayland recorder
-    let mut wayland_recorder = wayland_record::WaylandRecorder::new("aoe4_screen2").await?;
 
     // Start PipeWire stream
-    let (pipewire_control_handler, pipewire_join_handler) =
-        pipewire_stream::run(pipewire_sender, pixelbuf_content_clone);
+    let gtk_sender_clone = gtk_sender.clone();
+    let (receiver, pipewire_control_handler) = pipewire_stream::PipeWireStream::new_communication();
 
-    let gtk_sender = gtk_sender_clone.clone();
-    let pipewire_join_handler = tokio::spawn(async move {
-        let _ = task::spawn_blocking(move || {
-            let _ = pipewire_join_handler.join().map_err(|_| anyhow!("Failed to join pipewire thread"));
-        })
-            .await;
-        let _ = gtk_sender.try_send(GuiCommand::Quit);
+    let pipewire_sender_clone = pipewire_sender.clone();
+    let pipewire_handler: std::thread::JoinHandle<Result<()>> = std::thread::spawn(move || {
+        let pipewire_stream =
+            pipewire_stream::PipeWireStream::new(pipewire_sender_clone, pixelbuf_content_clone)?;
+
+        let pipewire_stream_clone = pipewire_stream.clone();
+        let _receiver_handler = receiver.attach(pipewire_stream.mainloop.loop_(), move |m| {
+            pipewire_stream_clone.handle(m)
+        });
+
+        pipewire_stream.mainloop.run();
+        info!("Pipewire thread exiting");
+        let _ = gtk_sender_clone.try_send(GuiCommand::Quit);
+        Ok(())
     });
 
-    let enable_waiting = process_monitor.armed;
+    let (control_sender, control_receiver) = create_control_event_channel();
+    let control_sender_ui = control_sender.clone();
 
-    let gtk_sender = gtk_sender_clone.clone();
+    let gtk_sender_clone = gtk_sender.clone();
+    let pipewire_control_handler_clone = pipewire_control_handler.clone();
+    let tokio_handler: std::thread::JoinHandle<Result<()>> = std::thread::spawn(move || {
+        Ok(tokio::runtime::Builder::new_multi_thread()
+            .enable_all()
+            .build()?
+            .block_on(tokio_thread(
+                gtk_sender_clone,
+                process_monitor,
+                record_type,
+                pipewire_control_handler_clone,
+                control_sender,
+                control_receiver,
+            ))?)
+    });
+
+    let gui_handler = std::thread::spawn(move || {
+        let application = ui::create(control_sender_ui.clone(), gtk_receiver, overlay_config, wait_for_process);
+        let application = match application {
+            Ok(application) => application,
+            Err(err) => {
+                error!("Overlay window error: {}", err);
+                return Err(anyhow::anyhow!(err));
+            }
+        };
+        application.run();
+        let _ = control_sender_ui.blocking_send(ControlEvent::Quit);
+        info!("GUI thread exiting");
+        Ok(())
+    });
+
+    // Wait for UI thread to finish
+    let _ = gui_handler.join();
+
+    pipewire_control_handler.stop();
+    let _ = pipewire_sender.send(false);
+
+    let _ = tokio_handler.join();
+    let _ = frame_processor_handler.join();
+    let _ = pipewire_handler.join();
+
+    Ok(())
+}
+
+async fn tokio_thread(
+    gtk_sender: Sender<GuiCommand>,
+    mut process_monitor: ProcessMonitor,
+    record_type: BitFlags<SourceType>,
+    pipewire_control_handler: PipeWireStopHandler,
+    control_sender: Sender<ControlEvent>,
+    control_receiver: Receiver<ControlEvent>,
+) -> Result<()> {
+    // Start the Wayland recorder
+    let (mut wayland_recorder, wayland_stop_handler) =
+        wayland_record::WaylandRecorder::new().await?; // "aoe4_screen2"
+
+    let gtk_sender_clone = gtk_sender.clone();
+    let control_sender_clone = control_sender.clone();
     tokio::spawn(async move {
         match signal::ctrl_c().await {
             Ok(()) => {
                 info!("Received Ctrl-C, shutting down gracefully...");
-                let _ = gtk_sender.try_send(GuiCommand::Quit);
+                let _ = gtk_sender_clone.try_send(GuiCommand::Quit);
+                let _ = control_sender_clone.send(ControlEvent::Quit).await;
             }
             Err(err) => {
                 error!("Unable to listen for shutdown signal: {}", err);
@@ -174,64 +202,89 @@ async fn main() -> Result<()> {
         }
     });
 
-    let wayland_stop_handler = wayland_recorder.get_stop_handler();
-
-    let gtk_sender = gtk_sender_clone.clone();
     let pipewire_sender_frames = pipewire_control_handler.get_frame_sender();
-    let process_monitor_handler = tokio::spawn(async move {
-        if process_monitor.armed {
-            info!("Waiting for process {}", process_monitor.process_name);
-        }
-        if let WaitForProcessResult::ProcessFound = process_monitor
-            .act_on_process(process_monitor::WaitForProcessTask::WaitForProcess)
-            .await
-        {
-            let _ = gtk_sender.try_send(GuiCommand::AboutToProcessFrames);
-            if let Err(e) = wayland_recorder
-                .run(
-                    record_type,
-                    wayland_record::CursorModeTypes::Hidden,
-                    pipewire_sender_frames,
-                )
-                .await
-            {
-                let _ = gtk_sender.try_send(GuiCommand::Quit);
-                error!("Failed to start Wayland recorder: {}", e);
-            }
-        }
 
-        if process_monitor.armed {
-            if let WaitForProcessResult::ProcessNotFound = process_monitor
-                .act_on_process(process_monitor::WaitForProcessTask::WaitForProcessEnd)
-                .await
-            {
-                info!("Monitored process ended, shutting down...");
-                let _ = gtk_sender.try_send(GuiCommand::Quit);
-            }
-        }
-    });
+    // TODO: This should be controlled from the UI
+    process_monitor.armed = false;
+    if process_monitor.armed {
+        let _ = control_sender
+            .send(ControlEvent::StartCaptureWaitForProcess)
+            .await;
+    } else {
+        info!("Process monitoring is not armed, starting capture immediately");
+        let _ = control_sender.send(ControlEvent::StartCapture).await;
+    }
 
-    match overlay_window_gtk::run(
-        gtk_sender_clone,
-        gtk_receiver,
-        overlay_config,
-        enable_waiting,
-    )
-        .await
-    {
-        Ok(()) => {
-            info!("Overlay window closed, shutting down...");
-        }
-        Err(err) => {
-            error!("Overlay window error: {}", err);
+    fn stop_process_monitoring(
+        process_monitor_quit_sender: &mut Option<tokio::sync::oneshot::Sender<()>>,
+    ) {
+        if let Some(quit_sender) = process_monitor_quit_sender.take() {
+            info!("Process monitor: Quitting any remaining listeners");
+            let _ = quit_sender.send(());
         }
     }
 
-    let _ = process_monitor_quitter.send(());
-    pipewire_control_handler.stop();
-    pipewire_join_handler.await.map_err(|_| anyhow!("Failed to join pipewire thread"))?;
+    // Handle control events
+    let mut control_receiver = control_receiver;
+    while let Some(event) = control_receiver.recv().await {
+        let mut process_monitor_quit_sender: Option<tokio::sync::oneshot::Sender<()>> = None;
+        match event {
+            ControlEvent::Quit => {
+                stop_process_monitoring(&mut process_monitor_quit_sender);
+                info!("Control event: Quit");
+                break;
+            }
+            ControlEvent::StartCapture => {
+                stop_process_monitoring(&mut process_monitor_quit_sender);
+                if let Err(e) = wayland_recorder
+                    .start(record_type, pipewire_sender_frames.clone())
+                    .await
+                {
+                    error!("Failed to start Wayland recorder: {}", e);
+                } else {
+                    let _ = gtk_sender.send(GuiCommand::StateCaptureStarted).await;
+                }
+            }
+            ControlEvent::StopCapture => {
+                stop_process_monitoring(&mut process_monitor_quit_sender);
+                if let Err(e) = wayland_recorder.stop().await {
+                    error!("Failed to start Wayland recorder: {}", e);
+                } else {
+                    let _ = gtk_sender.send(GuiCommand::StateCaptureStopped).await;
+                }
+            }
+            ControlEvent::ProcessStatusChanged(running) => {
+                if !process_monitor.armed {
+                    info!("Process monitoring is disarmed, ignoring status change");
+                    continue;
+                }
+                let _ = gtk_sender.send(GuiCommand::ProcessRunning(running)).await;
+
+                if running && !wayland_recorder.is_running() {
+                    info!("Process is running, starting capture");
+                    let _ = control_sender.send(ControlEvent::StartCapture).await;
+                } else if wayland_recorder.is_running() {
+                    info!("Process is not running, stopping capture");
+                    let _ = control_sender.send(ControlEvent::StopCapture).await;
+                }
+            }
+            ControlEvent::StartCaptureWaitForProcess => {
+                info!("Control event: StartWaitForProcess");
+                stop_process_monitoring(&mut process_monitor_quit_sender);
+                let control_sender_clone = control_sender.clone();
+                let (quit_sender, quit_receiver) = process_monitor.notify_control_channel();
+                process_monitor_quit_sender = Some(quit_sender);
+                process_monitor
+                    .notify_on_change(quit_receiver, control_sender_clone)
+                    .await;
+            }
+        }
+    }
+
     wayland_stop_handler.stop().await;
-    let _ = process_monitor_handler.await?;
-    let _ = processor_join_handle.await;
+    pipewire_control_handler.stop();
+
+    let _ = gtk_sender.try_send(GuiCommand::Quit);
+    info!("Tokio thread exiting");
     Ok(())
 }

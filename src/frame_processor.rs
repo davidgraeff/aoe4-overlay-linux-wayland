@@ -3,10 +3,10 @@ use crate::{
     pixelbuf_wrapper::{PixbufWrapper, PixelBufWrapperWithDroppedFramesTS},
 };
 use anyhow::{Result, anyhow};
-use aoe4_overlay::consts::{AREA_HEIGHT, AREA_WIDTH};
+use crate::consts::{AREA_HEIGHT, AREA_WIDTH};
 use log::{debug, error, info};
 use opencv::core::{Mat, MatTraitConst, Rect};
-use crate::overlay_window_gtk::GuiCommand;
+use crate::ui::GuiCommand;
 
 /// Frame data with original image and analysis results
 #[derive(Clone)]
@@ -48,6 +48,7 @@ impl FrameProcessor {
                 info!("Received quit signal, stopping frame processor");
                 break;
             }
+
             let mut content = frame_rx_content.lock().unwrap();
             if content.pixbuf.bgr_buffer.is_empty() || content.frames_written == 0 {
                 debug!("No frame available, skipping");

@@ -47,3 +47,11 @@ pub mod consts {
 
 pub mod ocr;
 pub mod image_analyzer;
+pub mod frame_processor;
+pub mod ui;
+pub mod pipewire_stream;
+pub mod pixelbuf_wrapper;
+pub mod process_monitor;
+pub mod utils;
+pub mod wayland_record;
+pub mod events;

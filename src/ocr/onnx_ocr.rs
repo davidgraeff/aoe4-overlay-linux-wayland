@@ -11,6 +11,7 @@ use oar_ocr::{
 };
 use std::{fs, path::Path, sync::Arc};
 use oar_ocr::core::StandardPredictor;
+use crate::utils::data_directory;
 
 /// ONNX Runtime-based text recognition engine
 pub struct OnnxOcrEngine {
@@ -24,19 +25,21 @@ impl OnnxOcrEngine {
             // OrtExecutionProvider::CPU,
         ]);
 
+        let models_dir = data_directory()?.join("models");
+
         let predictor = TextRecPredictorBuilder::new()
             .model_input_shape([3, 48, 320])
             .batch_size(8)
             .session_pool_size(8)
             .character_dict(
-                fs::read_to_string("models/numbers_only_dict.txt")?
+                fs::read_to_string(models_dir.join("numbers_only_dict.txt"))?
                     .lines()
                     .map(|l| l.to_string())
                     .collect(),
             )
             .model_name("PP-OCRv5_mobile_rec".to_string())
             .ort_session(ort_config)
-            .build(Path::new("models/latin_ppocrv5_mobile_rec.onnx"))?;
+            .build(&models_dir.join("latin_ppocrv5_mobile_rec.onnx"))?;
 
         Ok(Self {
             predictor: Arc::new(predictor),

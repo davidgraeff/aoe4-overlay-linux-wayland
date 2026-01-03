@@ -1,8 +1,6 @@
 use crate::pixelbuf_wrapper::PixelBufWrapperWithDroppedFramesTS;
 use anyhow::Result;
-use log::info;
 use pipewire::{
-    channel::Sender,
     context::Context,
     main_loop::MainLoop,
     spa,
@@ -22,50 +20,77 @@ use spa::{
     pod::{Object, Pod, Property, Value},
 };
 use std::{
-    sync::{Arc, Mutex, mpsc, mpsc::SyncSender},
-    thread,
+    sync::{Arc, Mutex, mpsc},
     time::{Duration, SystemTime, UNIX_EPOCH},
 };
+use pipewire::spa::sys::{spa_format_parse, spa_format_video_raw_parse, spa_video_info_raw};
 
-struct UserData {
+pub struct UserData {
     last_time: u64,
-    pw_sender_quit: Sender<PipewireMessage>,
+    mainloop: MainLoop,
 }
+
+pub struct PipeWireStreamState {
+    pub stream: Stream,
+    pub listener: StreamListener<UserData>,
+}
+
 /// Manages a PipeWire stream for screen capturing and sends images via a channel.
+#[derive(Clone)]
 pub struct PipeWireStream {
-    pub(crate) main_loop: MainLoop,
     context: Context,
-    stream: Option<Stream>,
-    listener: Option<StreamListener<UserData>>,
+    state: Arc<Mutex<Option<PipeWireStreamState>>>,
     image_sender: mpsc::SyncSender<bool>,
     image_sender_content: PixelBufWrapperWithDroppedFramesTS,
-    pub pw_sender_quit: Sender<PipewireMessage>,
+    pub mainloop: MainLoop,
 }
 
 impl PipeWireStream {
+
+    pub fn new_communication() -> (
+        pipewire::channel::Receiver<PipewireMessage>,
+        PipeWireStopHandler,
+    ) {
+        let (pw_sender, pw_receiver) = pipewire::channel::channel::<PipewireMessage>();
+        let stop_handler = PipeWireStopHandler { pw_sender };
+
+        (pw_receiver, stop_handler)
+    }
+
     /// Creates a new PipeWireStream instance.
     pub fn new(
         image_sender: mpsc::SyncSender<bool>,
         image_sender_content: PixelBufWrapperWithDroppedFramesTS,
-        pw_sender_quit: Sender<PipewireMessage>,
     ) -> Result<Self> {
         pipewire::init();
 
-        let main_loop = MainLoop::new(None)?;
-        let context = Context::new(&main_loop)?;
+        let mainloop = MainLoop::new(None)?;
 
-        Ok(Self {
-            main_loop,
-            context,
-            stream: None,
-            listener: None,
+        let mainloop_clone = mainloop.clone();
+        let pipewire_stream = Self {
+            context: Context::new(&mainloop_clone)?,
+            state: Arc::new(Mutex::new(None)),
             image_sender,
             image_sender_content,
-            pw_sender_quit,
-        })
+            mainloop,
+        };
+
+        Ok(pipewire_stream)
     }
 
-    pub fn connect_to_node(&mut self, node_id: u32) -> Result<()> {
+    pub fn handle(&self, m: PipewireMessage) {
+        match m {
+            PipewireMessage::Stop => {
+                log::info!("PipeWire main loop: Received stop message, quitting...");
+                self.mainloop.quit()
+            }
+            PipewireMessage::Connect(stream_node_id) => {
+                self.connect_to_node(stream_node_id).unwrap();
+            }
+        }
+    }
+
+    pub fn connect_to_node(&self, node_id: u32) -> Result<()> {
         let core = self.context.connect(None)?;
 
         // Create stream properties
@@ -88,7 +113,7 @@ impl PipeWireStream {
                 .duration_since(UNIX_EPOCH)
                 .unwrap_or(Duration::from_secs(0))
                 .as_millis() as u64,
-            pw_sender_quit: self.pw_sender_quit.clone(),
+            mainloop: self.mainloop.clone(),
         };
 
         // Set up stream listener
@@ -101,7 +126,7 @@ impl PipeWireStream {
                  new_state: StreamState| {
                     if let StreamState::Error(err) = new_state {
                         log::error!("Stream state to error: {}", err);
-                        let _ = user_data.pw_sender_quit.send(PipewireMessage::Stop);
+                        user_data.mainloop.quit();
                     } else {
                         log::info!(
                             "Stream state changed from {:?} to {:?}",
@@ -112,36 +137,41 @@ impl PipeWireStream {
                 },
             )
             .param_changed(|_stream, _user_data: &mut UserData, id, param| {
-                if let Some(_param) = param {
+                if let Some(param) = param {
                     if id == ParamType::Format.as_raw() {
-                        log::info!("Stream format changed");
+
+                        let mut media_type: u32 = 0;
+                        let mut media_subtype: u32 = 0;
+                        let mut uninit: ::std::mem::MaybeUninit<spa_video_info_raw> =
+                            ::std::mem::MaybeUninit::uninit();
+                        let video_info = uninit.as_mut_ptr();
+                        unsafe {
+                            spa_format_parse(
+                                param.as_raw_ptr(),
+                                &mut media_type,
+                                &mut media_subtype,
+                            );
+                            if spa_format_video_raw_parse(param.as_raw_ptr(), video_info) != 0 {
+                                log::info!("Stream format changed: width={}, height={}, max_framerate={}", unsafe { (*video_info).size.width }, unsafe { (*video_info).size.height }, unsafe { (*video_info).max_framerate.num });
+                                // println!("Stream unknown param changed: {} {:?}", id,
+                                //          *video_info);     } else {
+                                // println!("Stream unknown param changed: {} (non-video)", id);
+                            }
+                        }
                     } else if id == ParamType::Latency.as_raw() {
                         log::info!("Stream latency params changed");
                     } else if id == ParamType::Props.as_raw() {
                         log::info!("Stream props changed");
                     } else {
                         log::info!("Stream unknown params changed");
-                        // let mut media_type: u32 = 0;
-                        // let mut media_subtype: u32 = 0;
-                        // let mut uninit: ::std::mem::MaybeUninit<spa_video_info_raw> =
-                        //     ::std::mem::MaybeUninit::uninit();
-                        // let video_info = uninit.as_mut_ptr();
-                        // unsafe {
-                        //     spa_format_parse(
-                        //         param.as_raw_ptr(),
-                        //         &mut media_type,
-                        //         &mut media_subtype,
-                        //     );
-                        //     if !spa_format_video_raw_parse(param.as_raw_ptr(), video_info) {
-                        //         println!("Stream unknown param changed: {} {:?}", id,
-                        // *video_info);     } else {
-                        //         println!("Stream unknown param changed: {} (non-video)", id);
-                        //     }
-                        // }
                     }
                 }
             })
             .process(move |stream, user_data: &mut UserData| {
+                // Parse metadata of pipewire buffer
+                //let props = stream.properties();
+                //log::info!("Stream properties: {:?}", props);
+
                 let mut buffer = match stream.dequeue_buffer() {
                     None => {
                         log::error!("Failed to dequeue buffer");
@@ -150,27 +180,29 @@ impl PipeWireStream {
                     Some(buffer) => buffer,
                 };
                 // Reduce framerate to every 100ms (10fps) by comparing timestamps
-                {
-                    use std::time::{Duration, SystemTime, UNIX_EPOCH};
-                    let now = SystemTime::now()
-                        .duration_since(UNIX_EPOCH)
-                        .unwrap_or(Duration::from_secs(0))
-                        .as_millis() as u64;
-                    if now.saturating_sub(user_data.last_time) < 250 {
-                        return;
-                    }
-                    user_data.last_time = now;
-                }
+                // {
+                //     use std::time::{Duration, SystemTime, UNIX_EPOCH};
+                //     let last = user_data.last_time;
+                //     let now = SystemTime::now()
+                //         .duration_since(UNIX_EPOCH)
+                //         .unwrap_or(Duration::from_secs(0))
+                //         .as_millis() as u64;
+                //     user_data.last_time = now;
+                //     if now.saturating_sub(last) < 50 {
+                //         return;
+                //     }
+                // }
 
                 let data = buffer.datas_mut();
                 if data.is_empty() {
                     return;
                 }
                 let data = &mut data[0];
+
                 let chunk = data.chunk();
                 let stride = chunk.stride();
                 let size = chunk.size() as usize;
-                // log::info!("Buffer received, size: {}, stride: {}", size, stride);
+                //log::info!("Buffer received, size: {}, stride: {}", size, stride);
 
                 if data.data().is_none() {
                     return;
@@ -179,7 +211,7 @@ impl PipeWireStream {
                 let width = stride / 4; // For BGRx, 4 bytes per pixel
                 let height = slice.len() as i32 / stride;
 
-                // log::info!("Buffer received, dimensions: {}x{}", width, height);
+                //log::info!("Buffer received, dimensions: {}x{}", width, height);
 
                 if width <= 0 || height <= 0 || size <= 0 || slice.len() < size {
                     log::error!("Invalid image dimensions: {}x{}", width, height);
@@ -226,7 +258,7 @@ impl PipeWireStream {
                             alternatives: vec![
                                 utils::Id(spa::param::video::VideoFormat::BGRx.as_raw()),
                                 utils::Id(spa::param::video::VideoFormat::BGRA.as_raw()),
-                                // utils::Id(spa::param::video::VideoFormat::BGR.as_raw()),
+                                utils::Id(spa::param::video::VideoFormat::BGR.as_raw()),
                             ],
                         },
                     })),
@@ -245,23 +277,23 @@ impl PipeWireStream {
                 //         },
                 //     })),
                 // ),
-                // Property::new(
-                //     spa::param::format::FormatProperties::VideoFramerate.as_raw(),
-                //     Value::Choice(ChoiceValue::Fraction(utils::Choice {
-                //         0: ChoiceFlags::empty(),
-                //         1: ChoiceEnum::Enum {
-                //             default: utils::Fraction { num: 25, denom: 1 },
-                //             alternatives: vec![
-                //                 utils::Fraction { num: 0, denom: 1 },
-                //                 utils::Fraction { num: 25, denom: 1 },
-                //                 utils::Fraction {
-                //                     num: 1000,
-                //                     denom: 1,
-                //                 },
-                //             ],
-                //         },
-                //     })),
-                // ),
+                Property::new(
+                    spa::param::format::FormatProperties::VideoFramerate.as_raw(),
+                    Value::Choice(ChoiceValue::Fraction(utils::Choice {
+                        0: ChoiceFlags::empty(),
+                        1: ChoiceEnum::Enum {
+                            default: utils::Fraction { num: 25, denom: 1 },
+                            alternatives: vec![
+                                utils::Fraction { num: 0, denom: 1 },
+                                utils::Fraction { num: 25, denom: 1 },
+                                utils::Fraction {
+                                    num: 1000,
+                                    denom: 1,
+                                },
+                            ],
+                        },
+                    })),
+                ),
             ],
         };
         let format = Value::Object(format);
@@ -271,7 +303,7 @@ impl PipeWireStream {
         let mut params = [Pod::from_bytes(&values)
             .ok_or_else(|| anyhow::anyhow!("Failed to create Pod from bytes"))?];
 
-        info!("Connecting PipeWire stream...");
+        log::info!("Connecting PipeWire stream...");
         // Connect stream to the node
         stream.connect(
             Direction::Input,
@@ -287,16 +319,17 @@ impl PipeWireStream {
         //     return Err(anyhow::anyhow!("Stream failed to start"));
         // }
 
-        self.stream = Some(stream);
-        self.listener = Some(listener);
+        let mut state = self.state.lock().expect("Lock poisoned");
+        *state = Some(PipeWireStreamState { stream, listener });
         Ok(())
     }
 }
 
 impl Drop for PipeWireStream {
     fn drop(&mut self) {
-        if let Some(stream) = &self.stream {
-            let _ = stream.disconnect();
+        let state = self.state.lock().expect("Lock poisoned");
+        if let Some(state) = state.as_ref() {
+            let _ = state.stream.disconnect();
         }
     }
 }
@@ -306,6 +339,7 @@ pub enum PipewireMessage {
     Connect(u32),
 }
 
+#[derive(Clone)]
 pub struct PipeWireStopHandler {
     pw_sender: pipewire::channel::Sender<PipewireMessage>,
 }
@@ -317,37 +351,4 @@ impl PipeWireStopHandler {
     pub fn get_frame_sender(&self) -> pipewire::channel::Sender<PipewireMessage> {
         self.pw_sender.clone()
     }
-}
-
-pub fn run(
-    sender: SyncSender<bool>,
-    image_sender_content: PixelBufWrapperWithDroppedFramesTS,
-) -> (PipeWireStopHandler, thread::JoinHandle<()>) {
-    let (pw_sender, pw_receiver) = pipewire::channel::channel::<PipewireMessage>();
-    let pw_sender_clone = pw_sender.clone();
-    (
-        PipeWireStopHandler { pw_sender },
-        thread::spawn(move || {
-            let pipewire_stream =
-                PipeWireStream::new(sender, image_sender_content, pw_sender_clone).unwrap();
-            let mainloop = pipewire_stream.main_loop.clone();
-            let mainloop_clone = pipewire_stream.main_loop.clone();
-            let pipewire_stream_arc = Arc::new(Mutex::new(pipewire_stream));
-            let _receiver = pw_receiver.attach(mainloop.loop_(), {
-                move |m| match m {
-                    PipewireMessage::Stop => {
-                        log::info!("PipeWire main loop: Received stop message, quitting...");
-                        mainloop_clone.quit()
-                    }
-                    PipewireMessage::Connect(stream_node_id) => {
-                        let mut pipewire_stream = pipewire_stream_arc.lock().unwrap();
-                        pipewire_stream.connect_to_node(stream_node_id).unwrap();
-                    }
-                }
-            });
-            log::info!("Starting PipeWire main loop");
-            mainloop.run();
-            log::info!("Finished PipeWire main loop");
-        }),
-    )
 }

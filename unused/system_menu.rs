@@ -5,17 +5,10 @@ use gtk::prelude::{ActionMapExt, ApplicationExt};
 use crate::overlay_window_gtk::GuiCommand;
 
 pub struct SystemTray {
-    _app: gtk::Application,
 }
 
 impl SystemTray {
-    pub fn new(gtk_sender: tokio::sync::mpsc::Sender<GuiCommand>) -> Result<Self> {
-        // Create an application for the system tray
-        let app = gtk::Application::builder()
-            .application_id("com.aoe4.overlay.tray")
-            .flags(gio::ApplicationFlags::default())
-            .build();
-
+    pub fn new(app: gtk::Application, gtk_sender: tokio::sync::mpsc::Sender<GuiCommand>) -> Result<Self> {
         // Create a simple action for quit
         let quit_action = gio::SimpleAction::new("quit", None);
         quit_action.connect_activate(move |_, _| {
@@ -34,8 +27,6 @@ impl SystemTray {
         notification.add_button("Quit", "app.quit");
         app.send_notification(Some("running"), &notification);
 
-        Ok(Self {
-            _app: app,
-        })
+        Ok(Self { })
     }
 }

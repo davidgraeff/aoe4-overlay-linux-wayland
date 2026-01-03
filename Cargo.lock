@@ -131,6 +131,7 @@ name = "aoe4_overlay"
 version = "0.1.0"
 dependencies = [
  "anyhow",
+ "ashpd",
  "clap 4.5.48",
  "enigo",
  "env_logger 0.11.8",

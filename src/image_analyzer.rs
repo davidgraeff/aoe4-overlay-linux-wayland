@@ -1,4 +1,3 @@
-use crate::consts::{AOE4_STATS_POS, AREA_Y_OFFSET, STAT_RECT, VILLAGER_ICON_AREA};
 use crate::ocr::{
     OcrEngine,
     OcrEngineWrapper,
@@ -6,7 +5,11 @@ use crate::ocr::{
     onnx_ocr::OnnxOcrEngine,
     onnx_parallel_ocr::OnnxParallelOcrEngine,
     paddle_ocr::PaddleOcrEngine,
-    template_matching_ocr::{TemplateMatchingOcrEngine, TemplateMatchingConfig},
+    template_matching_ocr::{TemplateMatchingConfig, TemplateMatchingOcrEngine},
+};
+use crate::{
+    consts::{AOE4_STATS_POS, AREA_Y_OFFSET, STAT_RECT, VILLAGER_ICON_AREA},
+    utils::data_directory,
 };
 use anyhow::Result;
 use image::RgbImage;
@@ -17,10 +20,10 @@ use opencv::{
     prelude::*,
 };
 use std::{
+    path::PathBuf,
     sync::{Arc, Mutex},
     time::Duration,
 };
-
 
 #[derive(Debug, Clone)]
 pub struct AnalysisResult {
@@ -78,18 +81,25 @@ impl ImageAnalyzerInner {
             OCRModel::TemplateMatching => {
                 let config = TemplateMatchingConfig::default();
                 OcrEngineWrapper::TemplateMatching(TemplateMatchingOcrEngine::new(config)?)
-            }
-            // OCRModel::TemplateMatchingWithFallback => {
-            //     let config = TemplateMatchingConfig::default();
-            //     let primary = OcrEngineWrapper::TemplateMatching(TemplateMatchingOcrEngine::new(config)?);
-            //     let fallback = OcrEngineWrapper::Onnx(OnnxOcrEngine::new()?);
-            //     OcrEngineWrapper::Fallback(FallbackOcrEngine::new(primary, fallback, 0.75))
-            // }
+            } /* OCRModel::TemplateMatchingWithFallback => {
+               *     let config = TemplateMatchingConfig::default();
+               *     let primary =
+               * OcrEngineWrapper::TemplateMatching(TemplateMatchingOcrEngine::new(config)?);
+               *     let fallback = OcrEngineWrapper::Onnx(OnnxOcrEngine::new()?);
+               *     OcrEngineWrapper::Fallback(FallbackOcrEngine::new(primary, fallback, 0.75))
+               * } */
         };
 
         // Load villager icon template
-        let template_path = "src_images/villager_icon.png";
-        let villager_icon_template = imgcodecs::imread(template_path, IMREAD_COLOR)?;
+        let mut template_path = data_directory()?.join("src_images/villager_icon.png");
+        if !template_path.exists() {
+            anyhow::bail!(
+                "villager_icon.png not found at {}",
+                template_path.to_string_lossy()
+            );
+        }
+        let template_path = template_path.to_string_lossy().to_string();
+        let villager_icon_template = imgcodecs::imread(&template_path, IMREAD_COLOR)?;
 
         if villager_icon_template.empty() {
             anyhow::bail!("Failed to load template image from {}", template_path);
@@ -165,7 +175,9 @@ impl ImageAnalyzerInner {
             .collect();
 
         // Perform OCR using the selected engine
-        let detected_texts = self.ocr_engine.recognize_text::<{AOE4_STATS_POS.len()}>(&img, &regions)?;
+        let detected_texts = self
+            .ocr_engine
+            .recognize_text::<{ AOE4_STATS_POS.len() }>(&img, &regions)?;
 
         let ocr_time = now.elapsed() - convert_color_time - detect_villager_time;
         if ocr_time > Duration::from_millis(100) {

@@ -42,6 +42,7 @@ image = { version = "0.25", features = ["color_quant"] }
 zbus = { version = "5.11", default-features = false, features = ["tokio"] }
 enigo = { version = "0.6", default-features = true, features = ["wayland", "libei_tokio"] }
 pipewire = { version = "0.8", features = ["v0_3_77"] }
+ashpd = { version = "0.12.0", features = ["tokio"] }
 
 # OCR
 # ort = { version = "2.0.0-rc.10", features = ["rocm", "download-binaries", "fetch-models"] }

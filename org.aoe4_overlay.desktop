@@ -1,0 +1,8 @@
+[Desktop Entry]
+Name=AOE4 Overlay
+Comment=An overlay for Age of Empires IV
+Categories=Game;
+Exec=/home/david/Entwicklung/aoe4_overlay/target/release/aoe4_overlay
+Type=Application
+Icon=/home/david/Entwicklung/aoe4_overlay/src_images/icons/logo.png
+X-Desktop-File-Install-Version=0.28

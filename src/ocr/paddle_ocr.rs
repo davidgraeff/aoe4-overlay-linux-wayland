@@ -4,6 +4,7 @@ use super::OcrEngine;
 use anyhow::Result;
 use image::{DynamicImage, GenericImageView, RgbImage};
 use rust_paddle_ocr::Rec as PPRec;
+use crate::utils::data_directory;
 
 /// PaddleOCR-based text recognition engine
 pub struct PaddleOcrEngine {
@@ -12,9 +13,10 @@ pub struct PaddleOcrEngine {
 
 impl PaddleOcrEngine {
     pub fn new() -> Result<Self> {
+        let models_dir = data_directory()?.join("models");
         let rec = PPRec::from_file(
-            "./models/PP-OCRv5_mobile_rec_fp16.mnn",
-            "./models/ppocr_keys_v5.txt",
+            models_dir.join("PP-OCRv5_mobile_rec_fp16.mnn"),
+            models_dir.join("ppocr_keys_v5.txt"),
         )?
         .with_min_score(0.6)
         .with_punct_min_score(0.1);
