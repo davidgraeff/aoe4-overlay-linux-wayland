@@ -1,0 +1,23 @@
+<?xml version="1.0" encoding="UTF-8"?>
+<schemalist>
+  <schema id="org.gnome.shell.extensions.aoe4overlay" path="/org/gnome/shell/extensions/aoe4overlay/">
+    <key name="stick" type="b">
+      <default>false</default>
+    </key>
+    <key name="overlay-window-title" type="s">
+      <default>'AOE4 Overlay'</default>
+      <summary>Overlay Window Title</summary>
+      <description>The title of the window to keep always on top</description>
+    </key>
+    <key name="game-window-title" type="s">
+      <default>'Age of Empires IV'</default>
+      <summary>Game Window Title</summary>
+      <description>The title of the Age of Empires IV game window</description>
+    </key>
+    <key name="detected-window-titles" type="as">
+      <default>[]</default>
+      <summary>Detected Window Titles</summary>
+      <description>List of recently detected window titles for debugging</description>
+    </key>
+  </schema>
+</schemalist>

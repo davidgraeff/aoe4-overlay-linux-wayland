@@ -1,0 +1,17 @@
+{
+  "description": "Makes \"Age of Empires 4 Overlay\" windows stay on top (even on Wayland session).",
+  "extension-id": "aoe4overlay",
+  "name": "Always on top (AOE4 Overlay)",
+  "settings-schema": "org.gnome.shell.extensions.aoe4overlay",
+  "shell-version": [
+    "45",
+    "46",
+    "47",
+    "48",
+    "49",
+    "50"
+  ],
+  "url": "https://github.com/davidgraeff/aoe4overlay",
+  "uuid": "aoe4-overlay@davidgraeff.github.com",
+  "version": 6
+}
